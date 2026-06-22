@@ -10,6 +10,33 @@ Start a complete one-story run with:
 
 Paste the full prompt into a new Codex thread opened at this project root. The workflow researches the preceding 30 days, pauses after selecting one story, and continues only after receiving `APPROVE [story-slug]`.
 
+
+## Automation
+
+This repository now includes GitHub Actions workflows in `.github/workflows/` for OpenRouter-driven discovery, story production, weekly runs, and publish-package validation.
+
+### Required GitHub Secrets And Variables
+
+- `OPENROUTER_API_KEY` (secret, required)
+- `OPENROUTER_MODEL` (repository variable, optional fallback model)
+- `OPENROUTER_SITE_URL` (repository variable, optional)
+- `OPENROUTER_SITE_NAME` (repository variable, optional)
+
+A local example is provided in `.env.example`.
+
+### Workflow Files
+
+- `daily-discovery.yml` — scheduled and manual discovery, scoring, and selection
+- `story-production.yml` — builds one approved story from research packet through publishing package
+- `weekly-production.yml` — runs discovery and then produces the selected weekly stories
+- `publish-pipeline.yml` — validates completed packages and mirrors approved packages into `archive/`
+
+### Notes
+
+- Models that support current-web research through OpenRouter are recommended for the strongest discovery results.
+- Every workflow writes repository assets using the existing folder ownership and naming rules.
+- Verification gates still block downstream publishing-package steps when a report returns `HOLD` or `REJECT`.
+
 ## Workflow
 
 1. Topic Hunter discovers candidate stories.

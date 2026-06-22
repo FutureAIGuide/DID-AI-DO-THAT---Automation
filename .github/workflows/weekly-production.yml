@@ -1,0 +1,47 @@
+name: Weekly production
+
+on:
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: Days of recent developments to consider during discovery.
+        required: false
+        default: '30'
+      story_count:
+        description: Number of ranked stories to process this run.
+        required: false
+        default: '1'
+      model:
+        description: Optional OpenRouter model override.
+        required: false
+        default: ''
+  schedule:
+    - cron: '30 14 * * 1'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dadt-weekly-production
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    uses: ./.github/workflows/daily-discovery.yml
+    with:
+      lookback_days: ${{ inputs.lookback_days }}
+      selection_count: ${{ inputs.story_count }}
+      model: ${{ inputs.model }}
+    secrets: inherit
+
+  produce:
+    needs: discover
+    strategy:
+      fail-fast: false
+      matrix:
+        story_slug: ${{ fromJson(needs.discover.outputs.selected_slugs_json) }}
+    uses: ./.github/workflows/story-production.yml
+    with:
+      story_slug: ${{ matrix.story_slug }}
+      model: ${{ inputs.model }}
+    secrets: inherit

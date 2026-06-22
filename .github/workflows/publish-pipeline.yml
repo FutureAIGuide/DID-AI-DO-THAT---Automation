@@ -1,0 +1,135 @@
+name: Publish pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      story_slug:
+        description: Optional slug prefix to package and archive.
+        required: false
+        default: ''
+  workflow_run:
+    workflows:
+      - Story production
+      - Weekly production
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dadt-publish-pipeline
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate publishing packages and archive approved assets
+        env:
+          STORY_SLUG_FILTER: ${{ inputs.story_slug }}
+        run: |
+          python <<'PY'
+          import os
+          import pathlib
+          import shutil
+
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          filter_slug = os.environ.get("STORY_SLUG_FILTER", "").strip()
+          packages_root = root / "publishing/packages"
+          reports_root = root / "publishing/reports"
+          archive_root = root / "archive"
+
+          required_files = [
+              "article.md",
+              "newsletter.md",
+              "linkedin.md",
+              "x-threads.md",
+              "shorts.md",
+              "tiktoks.md",
+              "thumbnail-brief.md",
+              "social-brief.md",
+              "prompt-pad.md",
+              "seo.md",
+              "youtube.md",
+              "distribution.md",
+              "executive-summary.md",
+              "metadata.md",
+              "research-packet.md",
+              "draft-verification-report.md",
+              "package-verification-report.md",
+          ]
+
+          package_dirs = sorted(
+              path for path in packages_root.iterdir()
+              if path.is_dir() and path.name != ".gitkeep" and (not filter_slug or path.name.startswith(filter_slug))
+          )
+          if not package_dirs:
+              raise SystemExit("No publishing package directories matched the current filter.")
+
+          processed = []
+          for package_dir in package_dirs:
+              missing = [name for name in required_files if not (package_dir / name).exists()]
+              draft_report = (package_dir / "draft-verification-report.md").read_text(encoding="utf-8") if (package_dir / "draft-verification-report.md").exists() else ""
+              package_report = (package_dir / "package-verification-report.md").read_text(encoding="utf-8") if (package_dir / "package-verification-report.md").exists() else ""
+              approved = "PUBLISH" in draft_report.upper() and "PUBLISH" in package_report.upper() and not missing
+              status = "PUBLISH" if approved else "HOLD"
+              report_path = reports_root / f"{package_dir.name}-pipeline-validation-report.md"
+              report_path.write_text(
+                  "\n".join(
+                      [
+                          "# Publish Pipeline Validation",
+                          "",
+                          f"- Package: `{package_dir.relative_to(root).as_posix()}`",
+                          f"- Status: `{status}`",
+                          f"- Missing files: {', '.join(missing) if missing else 'none'}",
+                          f"- Draft verification present: `{'yes' if draft_report else 'no'}`",
+                          f"- Package verification present: `{'yes' if package_report else 'no'}`",
+                      ]
+                  )
+                  + "\n",
+                  encoding="utf-8",
+              )
+              if approved:
+                  archive_dir = archive_root / package_dir.name
+                  shutil.copytree(package_dir, archive_dir, dirs_exist_ok=True)
+                  (archive_dir / "archive-manifest.md").write_text(
+                      "\n".join(
+                          [
+                              "# Archive Manifest",
+                              "",
+                              f"- Story package: `{package_dir.name}`",
+                              "- Source assets retained in their original repository locations.",
+                              "- This archive mirrors the approved publishing package at packaging time.",
+                          ]
+                      )
+                      + "\n",
+                      encoding="utf-8",
+                  )
+              processed.append((package_dir.name, status))
+
+          summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          summary.write_text(
+              "# Publish pipeline\n\n" + "\n".join(f"- `{name}` → `{status}`" for name, status in processed) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Commit package validation and archive updates
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add publishing/reports archive
+          if git diff --cached --quiet; then
+            echo "No publish-pipeline changes to commit."
+            exit 0
+          fi
+          git commit -m "Run publish pipeline validation"
+          git push
