@@ -1,0 +1,363 @@
+name: Daily discovery
+
+on:
+  workflow_call:
+    inputs:
+      lookback_days:
+        required: false
+        type: string
+        default: '30'
+      selection_count:
+        required: false
+        type: string
+        default: '1'
+      model:
+        required: false
+        type: string
+        default: ''
+    outputs:
+      run_date:
+        value: ${{ jobs.discover.outputs.run_date }}
+      top_story_slug:
+        value: ${{ jobs.discover.outputs.top_story_slug }}
+      selected_slugs_json:
+        value: ${{ jobs.discover.outputs.selected_slugs_json }}
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: Days of recent AI developments to cover.
+        required: false
+        default: '30'
+      selection_count:
+        description: Number of ranked story slugs to expose as workflow outputs.
+        required: false
+        default: '1'
+      model:
+        description: Optional OpenRouter model override.
+        required: false
+        default: ''
+  schedule:
+    # Runs every day at 13:15 UTC.
+    - cron: '15 13 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dadt-daily-discovery
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      run_date: ${{ steps.generate.outputs.run_date }}
+      top_story_slug: ${{ steps.generate.outputs.top_story_slug }}
+      selected_slugs_json: ${{ steps.generate.outputs.selected_slugs_json }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate discovery, scoring, and selection files
+        id: generate
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          INPUT_MODEL: ${{ inputs.model }}
+          INPUT_LOOKBACK_DAYS: ${{ inputs.lookback_days }}
+          INPUT_SELECTION_COUNT: ${{ inputs.selection_count }}
+          DEFAULT_OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
+          OPENROUTER_SITE_URL: ${{ vars.OPENROUTER_SITE_URL }}
+          OPENROUTER_SITE_NAME: ${{ vars.OPENROUTER_SITE_NAME }}
+        run: |
+          python <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import urllib.error
+          import urllib.request
+          import textwrap
+          from datetime import datetime, timezone
+
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+          if not api_key:
+              raise SystemExit("OPENROUTER_API_KEY secret is required.")
+
+          model = (
+              os.environ.get("INPUT_MODEL", "").strip()
+              or os.environ.get("DEFAULT_OPENROUTER_MODEL", "").strip()
+              or "anthropic/claude-3.5-sonnet"
+          )
+          lookback_days = int((os.environ.get("INPUT_LOOKBACK_DAYS") or "30").strip())
+          selection_count = max(1, int((os.environ.get("INPUT_SELECTION_COUNT") or "1").strip()))
+          run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+          def read(rel):
+              return (root / rel).read_text(encoding="utf-8")
+
+          def next_file(rel):
+              path = root / rel
+              path.parent.mkdir(parents=True, exist_ok=True)
+              if not path.exists():
+                  return path
+              stem, suffix = path.stem, path.suffix
+              index = 2
+              while True:
+                  candidate = path.with_name(f"{stem}-{index:02d}{suffix}")
+                  if not candidate.exists():
+                      return candidate
+                  index += 1
+
+          def save(rel, content):
+              path = next_file(rel)
+              cleaned = content.strip() + "\n"
+              path.write_text(cleaned, encoding="utf-8")
+              return path.relative_to(root).as_posix()
+
+          def render_text(content):
+              if isinstance(content, str):
+                  return content
+              if isinstance(content, list):
+                  parts = []
+                  for item in content:
+                      if isinstance(item, dict):
+                          parts.append(item.get("text", ""))
+                      else:
+                          parts.append(str(item))
+                  return "".join(parts)
+              return str(content)
+
+          referer = os.environ.get("OPENROUTER_SITE_URL", "").strip()
+          title = os.environ.get("OPENROUTER_SITE_NAME", "DID AI DO THAT?! Automation").strip()
+
+          def call_model(label, prompt):
+              payload = {
+                  "model": model,
+                  "messages": [
+                      {
+                          "role": "system",
+                          "content": (
+                              "You are an evidence-first automation agent for the DID AI DO THAT?! repository. "
+                              "Follow repository rules exactly. Never fabricate sources, quotes, documents, laws, people, dates, or statistics. "
+                              "Return markdown only unless JSON is explicitly requested."
+                          ),
+                      },
+                      {"role": "user", "content": prompt},
+                  ],
+                  "temperature": 0.2,
+              }
+              headers = {
+                  "Authorization": "Bearer " + api_key,
+                  "Content-Type": "application/json",
+              }
+              if referer:
+                  headers["HTTP-Referer"] = referer
+              if title:
+                  headers["X-Title"] = title
+              request = urllib.request.Request(
+                  "https://openrouter.ai/api/v1/chat/completions",
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers=headers,
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=300) as response:
+                      body = json.loads(response.read().decode("utf-8"))
+              except urllib.error.HTTPError as exc:
+                  detail = exc.read().decode("utf-8", errors="replace")
+                  raise SystemExit(f"OpenRouter request failed during {label}: {exc.code} {detail}")
+              except urllib.error.URLError as exc:
+                  raise SystemExit(f"OpenRouter request failed during {label}: {exc}")
+              content = body["choices"][0]["message"]["content"]
+              return render_text(content).strip()
+
+          repo_context = "\n\n".join(
+              [
+                  read("README.md"),
+                  read("AGENTS.md"),
+                  read("agents/topic-hunter.md"),
+                  read("agents/story-scorer.md"),
+                  read("prompts/topic-discovery.md"),
+                  read("prompts/topic-selection.md"),
+              ]
+          )
+
+          discovery = call_model(
+              "topic discovery",
+              textwrap.dedent(
+                  f"""
+                  Today's UTC date is {run_date}. Research the preceding {lookback_days} calendar days.
+
+                  Repository context:
+                  {repo_context}
+
+                  Task:
+                  - Produce a markdown report for research/incoming/{run_date}-story-discovery.md.
+                  - Discover 50 candidate stories in the repository's focus areas.
+                  - Use clear source lists for each story.
+                  - Make it easy for downstream scoring to parse.
+                  - Include a short 'Run Metadata' block at the top with the date range.
+                  """
+              ).strip(),
+          )
+          discovery_path = save(f"research/incoming/{run_date}-story-discovery.md", discovery)
+
+          scoring = call_model(
+              "story scoring",
+              textwrap.dedent(
+                  f"""
+                  Today's UTC date is {run_date}.
+
+                  Repository context:
+                  {repo_context}
+
+                  Incoming discovery file:
+                  {discovery}
+
+                  Task:
+                  - Produce a markdown report for research/scored/{run_date}-story-scores.md.
+                  - Score every candidate with the categories defined in the repository.
+                  - Rank the full list.
+                  - End with a 'Top 10 Summary' section.
+                  """
+              ).strip(),
+          )
+          scoring_path = save(f"research/scored/{run_date}-story-scores.md", scoring)
+
+          top_ten = call_model(
+              "top 10 ranking",
+              textwrap.dedent(
+                  f"""
+                  Today's UTC date is {run_date}.
+
+                  Repository context:
+                  {repo_context}
+
+                  Scored candidates:
+                  {scoring}
+
+                  Return markdown only for research/selected/{run_date}-top-10-ranking.md.
+                  For each ranked item include these exact labels:
+                  - Rank:
+                  - Title:
+                  - Slug:
+                  - Category:
+                  - Total Score:
+                  - Why It Matters:
+                  - Investigation Potential:
+
+                  Return exactly 10 ranked entries.
+                  """
+              ).strip(),
+          )
+          top_ten_path = save(f"research/selected/{run_date}-top-10-ranking.md", top_ten)
+
+          top_story = call_model(
+              "top story selection",
+              textwrap.dedent(
+                  f"""
+                  Today's UTC date is {run_date}.
+
+                  Repository context:
+                  {repo_context}
+
+                  Scored candidates:
+                  {scoring}
+
+                  Return markdown only for research/selected/{run_date}-top-story.md.
+                  Include these exact labels near the top:
+                  - TITLE:
+                  - SLUG:
+                  - EDITOR'S DECISION:
+                  - WHY THIS STORY WINS:
+                  - KEY QUESTIONS TO INVESTIGATE:
+                  - POTENTIAL RISKS:
+                  - EXPECTED IMPACT:
+                  """
+              ).strip(),
+          )
+          top_story_path = save(f"research/selected/{run_date}-top-story.md", top_story)
+
+          editorial_brief = call_model(
+              "editorial brief",
+              textwrap.dedent(
+                  f"""
+                  Today's UTC date is {run_date}.
+
+                  Repository context:
+                  {repo_context}
+
+                  Top 10 ranking:
+                  {top_ten}
+
+                  Top story:
+                  {top_story}
+
+                  Return markdown only for research/selected/{run_date}-editorial-brief.md.
+                  Summarize the editorial rationale, content multiplier opportunities, follow-up opportunities, and any evidence gaps that must be checked later.
+                  """
+              ).strip(),
+          )
+          editorial_brief_path = save(f"research/selected/{run_date}-editorial-brief.md", editorial_brief)
+
+          top_ten_slugs = re.findall(
+              r"^\s*(?:-\s*)?Slug:\s*`?([a-z0-9]+(?:-[a-z0-9]+)*)`?\s*$",
+              top_ten,
+              flags=re.IGNORECASE | re.MULTILINE,
+          )
+          top_story_slugs = re.findall(
+              r"^\s*SLUG:\s*`?([a-z0-9]+(?:-[a-z0-9]+)*)`?\s*$",
+              top_story,
+              flags=re.MULTILINE,
+          )
+          slugs = top_ten_slugs or top_story_slugs
+          if not slugs:
+              raise SystemExit(
+                  "Could not extract story slugs from OpenRouter output. "
+                  f"Top-10 slug matches: {len(top_ten_slugs)}. Top-story slug matches: {len(top_story_slugs)}."
+              )
+          selected_slugs = slugs[:selection_count]
+          top_story_slug = selected_slugs[0]
+
+          summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          summary.write_text(
+              "\n".join(
+                  [
+                      "# Daily discovery complete",
+                      "",
+                      f"- Model: `{model}`",
+                      f"- Lookback days: `{lookback_days}`",
+                      f"- Top story slug: `{top_story_slug}`",
+                      f"- Discovery file: `{discovery_path}`",
+                      f"- Scoring file: `{scoring_path}`",
+                      f"- Top-10 file: `{top_ten_path}`",
+                      f"- Top-story file: `{top_story_path}`",
+                      f"- Editorial brief: `{editorial_brief_path}`",
+                  ]
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+
+          output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as handle:
+              handle.write(f"run_date={run_date}\n")
+              handle.write(f"top_story_slug={top_story_slug}\n")
+              handle.write(f"selected_slugs_json={json.dumps(selected_slugs)}\n")
+          PY
+
+      - name: Commit generated discovery assets
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add research/incoming research/scored research/selected
+          if git diff --cached --quiet; then
+            echo "No discovery changes to commit."
+            exit 0
+          fi
+          git commit -m "Add daily discovery outputs for ${{ steps.generate.outputs.run_date }}"
+          git push
