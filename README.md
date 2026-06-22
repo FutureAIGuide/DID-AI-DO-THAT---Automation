@@ -4,11 +4,11 @@ This repository defines the editorial agents, prompts, workflows, templates, and
 
 ## Quick Start
 
-Start a complete one-story run with:
+For zero-touch automation, use `.github/workflows/weekly-production.yml` as the main entry point. It runs discovery, fans out story production for every selected slug, and lets the publish pipeline archive only approved packages afterward.
+
+For local prompting and iterative workflow authoring, start from:
 
 `prompts/start-one-story-workflow.md`
-
-Paste the full prompt into a new Codex thread opened at this project root. The workflow researches the preceding 30 days, pauses after selecting one story, and continues only after receiving `APPROVE [story-slug]`.
 
 
 ## Automation
@@ -26,16 +26,18 @@ A local example is provided in `.env.example`.
 
 ### Workflow Files
 
-- `daily-discovery.yml` — scheduled daily at 13:15 UTC plus manual discovery, scoring, and selection
-- `story-production.yml` — builds one approved story from research packet through publishing package
-- `weekly-production.yml` — scheduled Mondays at 14:30 UTC to run discovery and then produce the selected weekly stories
-- `publish-pipeline.yml` — validates completed packages and mirrors approved packages into `archive/`
+- `daily-discovery.yml` — reusable/manual/scheduled discovery that emits normalized slug outputs plus a selection manifest
+- `story-production.yml` — builds one story, records machine-readable gate status, and only creates a publishable package after both gates pass
+- `weekly-production.yml` — the primary scheduled/manual orchestrator that runs discovery and fans out story production only when slugs were selected
+- `publish-pipeline.yml` — validates packages from the triggering run and mirrors only approved packages into `archive/`
 
 ### Notes
 
 - Models that support current-web research through OpenRouter are recommended for the strongest discovery results.
 - Every workflow writes repository assets using the existing folder ownership and naming rules.
-- Verification gates still block downstream publishing-package steps when a report returns `HOLD` or `REJECT`.
+- Discovery can complete with zero selected slugs; weekly production then exits cleanly without starting story-production jobs.
+- Story production always writes verification reports and workflow status metadata, but it stops before packaging/final publishing when a gate returns `HOLD` or `REJECT`.
+- The publish pipeline only considers packages marked archive-eligible by the workflow run that triggered it.
 
 ## Workflow
 
@@ -49,7 +51,7 @@ A local example is provided in `.env.example`.
 8. Newsletter, social, visual, and prompt-pad builders create derivative assets.
 9. Verifier runs the package gate across all derivative assets.
 10. Publisher promotes approved drafts to final and builds the publishing package.
-11. The publish pipeline validates the complete package.
+11. The publish pipeline validates the complete package from the triggering run.
 12. Completed assets are archived.
 
 No verification or approval step may be skipped.

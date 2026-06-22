@@ -35,8 +35,10 @@ jobs:
       - name: Validate publishing packages and archive approved assets
         env:
           STORY_SLUG_FILTER: ${{ inputs.story_slug }}
+          SOURCE_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || '' }}
         run: |
           python <<'PY'
+          import json
           import os
           import pathlib
           import shutil
@@ -46,6 +48,7 @@ jobs:
           packages_root = root / "publishing/packages"
           reports_root = root / "publishing/reports"
           archive_root = root / "archive"
+          source_run_id = os.environ.get("SOURCE_RUN_ID", "").strip()
 
           required_files = [
               "article.md",
@@ -65,21 +68,44 @@ jobs:
               "research-packet.md",
               "draft-verification-report.md",
               "package-verification-report.md",
+              "workflow-status.json",
           ]
 
-          package_dirs = sorted(
-              path for path in packages_root.iterdir()
-              if path.is_dir() and path.name != ".gitkeep" and (not filter_slug or path.name.startswith(filter_slug))
-          )
-          if not package_dirs:
-              raise SystemExit("No publishing package directories matched the current filter.")
+          if not packages_root.exists():
+              package_dirs = []
+          else:
+              package_dirs = sorted(
+                  path for path in packages_root.iterdir()
+                  if path.is_dir() and path.name != ".gitkeep" and (not filter_slug or path.name.startswith(filter_slug))
+              )
+
+          filtered_package_dirs = []
+          for package_dir in package_dirs:
+              status_path = package_dir / "workflow-status.json"
+              if not status_path.exists():
+                  continue
+              try:
+                  workflow_status = json.loads(status_path.read_text(encoding="utf-8"))
+              except json.JSONDecodeError:
+                  continue
+              if source_run_id and str(workflow_status.get("source_run_id", "")).strip() != source_run_id:
+                  continue
+              filtered_package_dirs.append((package_dir, workflow_status))
+
+          if not filtered_package_dirs:
+              summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+              summary.write_text(
+                  "# Publish pipeline\n\n- Result: `No publishable packages matched this run.`\n",
+                  encoding="utf-8",
+              )
+              raise SystemExit(0)
 
           processed = []
-          for package_dir in package_dirs:
+          for package_dir, workflow_status in filtered_package_dirs:
               missing = [name for name in required_files if not (package_dir / name).exists()]
               draft_report = (package_dir / "draft-verification-report.md").read_text(encoding="utf-8") if (package_dir / "draft-verification-report.md").exists() else ""
               package_report = (package_dir / "package-verification-report.md").read_text(encoding="utf-8") if (package_dir / "package-verification-report.md").exists() else ""
-              approved = "PUBLISH" in draft_report.upper() and "PUBLISH" in package_report.upper() and not missing
+              approved = bool(workflow_status.get("archive_eligible")) and not missing
               status = "PUBLISH" if approved else "HOLD"
               report_path = reports_root / f"{package_dir.name}-pipeline-validation-report.md"
               report_path.write_text(
@@ -89,6 +115,10 @@ jobs:
                           "",
                           f"- Package: `{package_dir.relative_to(root).as_posix()}`",
                           f"- Status: `{status}`",
+                          f"- Source run id: `{workflow_status.get('source_run_id', '')}`",
+                          f"- Pipeline status: `{workflow_status.get('pipeline_status', '')}`",
+                          f"- Draft decision: `{workflow_status.get('draft_decision', '')}`",
+                          f"- Package decision: `{workflow_status.get('package_decision', '')}`",
                           f"- Missing files: {', '.join(missing) if missing else 'none'}",
                           f"- Draft verification present: `{'yes' if draft_report else 'no'}`",
                           f"- Package verification present: `{'yes' if package_report else 'no'}`",
@@ -117,7 +147,10 @@ jobs:
 
           summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
           summary.write_text(
-              "# Publish pipeline\n\n" + "\n".join(f"- `{name}` → `{status}`" for name, status in processed) + "\n",
+              "# Publish pipeline\n\n"
+              + (f"- Source run id: `{source_run_id}`\n" if source_run_id else "")
+              + "\n".join(f"- `{name}` → `{status}`" for name, status in processed)
+              + "\n",
               encoding="utf-8",
           )
           PY
