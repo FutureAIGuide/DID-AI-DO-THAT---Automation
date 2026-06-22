@@ -30,9 +30,9 @@ jobs:
   discover:
     uses: ./.github/workflows/daily-discovery.yml
     with:
-      lookback_days: ${{ inputs.lookback_days || '30' }}
-      selection_count: ${{ inputs.story_count || '1' }}
-      model: ${{ inputs.model || '' }}
+      lookback_days: ${{ inputs.lookback_days != '' && inputs.lookback_days || '30' }}
+      selection_count: ${{ inputs.story_count != '' && inputs.story_count || '1' }}
+      model: ${{ inputs.model != '' && inputs.model || '' }}
     secrets: inherit
 
   produce:
@@ -45,7 +45,7 @@ jobs:
     uses: ./.github/workflows/story-production.yml
     with:
       story_slug: ${{ matrix.story_slug }}
-      model: ${{ inputs.model || '' }}
+      model: ${{ inputs.model != '' && inputs.model || '' }}
     secrets: inherit
 
   no-stories:

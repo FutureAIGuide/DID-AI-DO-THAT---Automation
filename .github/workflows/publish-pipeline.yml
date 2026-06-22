@@ -49,6 +49,7 @@ jobs:
           reports_root = root / "publishing/reports"
           archive_root = root / "archive"
           source_run_id = os.environ.get("SOURCE_RUN_ID", "").strip()
+          filter_by_source_run = bool(source_run_id)
 
           required_files = [
               "article.md",
@@ -88,7 +89,7 @@ jobs:
                   workflow_status = json.loads(status_path.read_text(encoding="utf-8"))
               except json.JSONDecodeError:
                   continue
-              if source_run_id and str(workflow_status.get("source_run_id", "")).strip() != source_run_id:
+              if filter_by_source_run and str(workflow_status.get("source_run_id", "")).strip() != source_run_id:
                   continue
               filtered_package_dirs.append((package_dir, workflow_status))
 

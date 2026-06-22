@@ -358,7 +358,7 @@ jobs:
           prompt_pad_path = None
 
           if status_payload["draft_decision"] != "PUBLISH":
-              status_payload["package_decision"] = status_payload["draft_decision"]
+              status_payload["package_decision"] = "SKIPPED"
               status_payload["pipeline_status"] = f"stopped-after-draft-{status_payload['draft_decision'].lower()}"
               package_report = (
                   "# Package verification skipped.\n\n"

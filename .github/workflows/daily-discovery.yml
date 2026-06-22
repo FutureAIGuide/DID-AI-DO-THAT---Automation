@@ -105,6 +105,7 @@ jobs:
               or "anthropic/claude-3.5-sonnet"
           )
           lookback_days = int((os.environ.get("INPUT_LOOKBACK_DAYS") or "30").strip())
+          # Zero is valid so scheduled orchestration can complete cleanly without fan-out.
           selection_count = max(0, int((os.environ.get("INPUT_SELECTION_COUNT") or "1").strip()))
           run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
