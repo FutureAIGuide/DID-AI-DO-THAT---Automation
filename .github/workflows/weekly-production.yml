@@ -30,13 +30,14 @@ jobs:
   discover:
     uses: ./.github/workflows/daily-discovery.yml
     with:
-      lookback_days: ${{ inputs.lookback_days }}
-      selection_count: ${{ inputs.story_count }}
-      model: ${{ inputs.model }}
+      lookback_days: ${{ inputs.lookback_days != '' && inputs.lookback_days || '30' }}
+      selection_count: ${{ inputs.story_count != '' && inputs.story_count || '1' }}
+      model: ${{ inputs.model != '' && inputs.model || '' }}
     secrets: inherit
 
   produce:
     needs: discover
+    if: needs.discover.outputs.has_selected_stories == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -44,5 +45,40 @@ jobs:
     uses: ./.github/workflows/story-production.yml
     with:
       story_slug: ${{ matrix.story_slug }}
-      model: ${{ inputs.model }}
+      model: ${{ inputs.model != '' && inputs.model || '' }}
     secrets: inherit
+
+  no-stories:
+    needs: discover
+    if: needs.discover.outputs.has_selected_stories != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize no-op weekly run
+        run: |
+          cat <<'EOF' >>"$GITHUB_STEP_SUMMARY"
+          # Weekly production
+
+          - Discovery status: `${{ needs.discover.outputs.selection_status }}`
+          - Selected story count: `${{ needs.discover.outputs.selected_count }}`
+          - Selection manifest: `${{ needs.discover.outputs.selection_manifest_path }}`
+          - Result: `No story-production jobs were started.`
+          EOF
+
+  summarize:
+    needs:
+      - discover
+      - produce
+      - no-stories
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize weekly orchestration
+        run: |
+          cat <<'EOF' >>"$GITHUB_STEP_SUMMARY"
+          # Weekly production summary
+
+          - Discovery status: `${{ needs.discover.outputs.selection_status }}`
+          - Selected story count: `${{ needs.discover.outputs.selected_count }}`
+          - Selected slugs: `${{ needs.discover.outputs.selected_slugs_json }}`
+          - Selection manifest: `${{ needs.discover.outputs.selection_manifest_path }}`
+          EOF

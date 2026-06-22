@@ -19,6 +19,12 @@ on:
         value: ${{ jobs.produce.outputs.draft_decision }}
       package_decision:
         value: ${{ jobs.produce.outputs.package_decision }}
+      archive_eligible:
+        value: ${{ jobs.produce.outputs.archive_eligible }}
+      pipeline_status:
+        value: ${{ jobs.produce.outputs.pipeline_status }}
+      status_manifest_path:
+        value: ${{ jobs.produce.outputs.status_manifest_path }}
   workflow_dispatch:
     inputs:
       story_slug:
@@ -47,6 +53,9 @@ jobs:
       package_dir: ${{ steps.generate.outputs.package_dir }}
       draft_decision: ${{ steps.generate.outputs.draft_decision }}
       package_decision: ${{ steps.generate.outputs.package_decision }}
+      archive_eligible: ${{ steps.generate.outputs.archive_eligible }}
+      pipeline_status: ${{ steps.generate.outputs.pipeline_status }}
+      status_manifest_path: ${{ steps.generate.outputs.status_manifest_path }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -89,6 +98,10 @@ jobs:
               or "anthropic/claude-3.5-sonnet"
           )
           run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+          run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
+          run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "").strip()
+          workflow_name = os.environ.get("GITHUB_WORKFLOW", "").strip()
+          event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip()
           referer = os.environ.get("OPENROUTER_SITE_URL", "").strip()
           title = os.environ.get("OPENROUTER_SITE_NAME", "DID AI DO THAT?! Automation").strip()
 
@@ -199,6 +212,12 @@ jobs:
                   raise SystemExit("Could not determine verification decision from report output.")
               return matches[-1]
 
+          def write_status_manifest(status_payload):
+              path = root / "publishing/reports" / f"{story_slug}-workflow-status.json"
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(json.dumps(status_payload, indent=2) + "\n", encoding="utf-8")
+              return path
+
           selected_files = sorted((root / "research/selected").glob("*.md"))
           relevant_selected = []
           for file_path in selected_files:
@@ -224,6 +243,24 @@ jobs:
               ]
           )
           compose = lambda value: textwrap.dedent(value).strip()
+          package_dir = None
+          article_final_path = None
+          newsletter_final_path = None
+          published_case_file_path = None
+          status_payload = {
+              "story_slug": story_slug,
+              "run_date": run_date,
+              "source_run_id": run_id,
+              "source_run_attempt": run_attempt,
+              "source_workflow": workflow_name,
+              "source_event_name": event_name,
+              "draft_decision": "SKIPPED",
+              "package_decision": "SKIPPED",
+              "archive_eligible": False,
+              "pipeline_status": "running",
+              "package_dir": "",
+              "reports": {},
+          }
 
           research_packet = call_model(
               "research packet",
@@ -308,269 +345,303 @@ jobs:
               ),
           )
           draft_report_path = save_file(f"publishing/reports/{story_slug}-draft-verification-report.md", draft_report)
-          draft_decision = parse_decision(draft_report)
-          if draft_decision != "PUBLISH":
-              raise SystemExit(f"Draft gate returned {draft_decision}. Stopping pipeline.")
+          status_payload["draft_decision"] = parse_decision(draft_report)
+          package_report_path = root / "publishing/reports" / f"{story_slug}-package-verification-report.md"
+          newsletter_path = None
+          linkedin_path = None
+          x_threads_path = None
+          shorts_path = None
+          tiktoks_path = None
+          banks_path = None
+          thumbnail_path = None
+          social_brief_path = None
+          prompt_pad_path = None
 
-          newsletter = call_model(
-              "newsletter draft",
-              compose(
-                  f"""
-                  Today's UTC date is {run_date}. Target slug: {story_slug}.
+          if status_payload["draft_decision"] != "PUBLISH":
+              status_payload["package_decision"] = "SKIPPED"
+              status_payload["pipeline_status"] = f"stopped-after-draft-{status_payload['draft_decision'].lower()}"
+              package_report = (
+                  "# Package verification skipped.\n\n"
+                  f"- Reason: Draft gate returned `{status_payload['draft_decision']}`.\n\n"
+                  "FINAL GRADE: SKIPPED\n"
+                  f"FINAL DECISION: {status_payload['package_decision']}\n"
+              )
+              package_report_path.write_text(package_report, encoding="utf-8")
+          else:
+              newsletter = call_model(
+                  "newsletter draft",
+                  compose(
+                      f"""
+                      Today's UTC date is {run_date}. Target slug: {story_slug}.
 
-                  Repository rules:
-                  {repo_rules}
+                      Repository rules:
+                      {repo_rules}
 
-                  Approved investigation:
-                  {draft}
+                      Approved investigation:
+                      {draft}
 
-                  Draft verification report:
-                  {draft_report}
+                      Draft verification report:
+                      {draft_report}
 
-                  Return markdown only for /newsletter/drafts/{story_slug}-newsletter.md.
-                  """
-              ),
-          )
-          newsletter_path = save_file(f"newsletter/drafts/{story_slug}-newsletter.md", newsletter)
+                      Return markdown only for /newsletter/drafts/{story_slug}-newsletter.md.
+                      """
+                  ),
+              )
+              newsletter_path = save_file(f"newsletter/drafts/{story_slug}-newsletter.md", newsletter)
 
-          social_bundle = call_model(
-              "social bundle",
-              compose(
-                  f"""
-                  Today's UTC date is {run_date}. Target slug: {story_slug}.
+              social_bundle = call_model(
+                  "social bundle",
+                  compose(
+                      f"""
+                      Today's UTC date is {run_date}. Target slug: {story_slug}.
 
-                  Repository rules:
-                  {repo_rules}
+                      Repository rules:
+                      {repo_rules}
 
-                  Approved investigation:
-                  {draft}
+                      Approved investigation:
+                      {draft}
 
-                  Draft verification report:
-                  {draft_report}
+                      Draft verification report:
+                      {draft_report}
 
-                  Return markdown with these exact top-level headings only:
-                  # LINKEDIN
-                  # X THREADS
-                  # SHORTS
-                  # TIKTOKS
-                  # CTA BANK
-                  # HOOK BANK
-                  """
-              ),
-          )
-          social_sections = split_sections(
-              social_bundle,
-              ["LINKEDIN", "X THREADS", "SHORTS", "TIKTOKS", "CTA BANK", "HOOK BANK"],
-          )
-          linkedin_path = save_file(f"social/linkedin/{story_slug}-linkedin.md", social_sections["LINKEDIN"])
-          x_threads_path = save_file(f"social/x-threads/{story_slug}-x-threads.md", social_sections["X THREADS"])
-          shorts_path = save_file(f"video/shorts/{story_slug}-shorts.md", social_sections["SHORTS"])
-          tiktoks_path = save_file(f"video/tiktoks/{story_slug}-tiktoks.md", social_sections["TIKTOKS"])
-          banks_path = save_file(f"social/{story_slug}-cta-hook-bank.md", social_sections["CTA BANK"] + "\n\n" + social_sections["HOOK BANK"])
+                      Return markdown with these exact top-level headings only:
+                      # LINKEDIN
+                      # X THREADS
+                      # SHORTS
+                      # TIKTOKS
+                      # CTA BANK
+                      # HOOK BANK
+                      """
+                  ),
+              )
+              social_sections = split_sections(
+                  social_bundle,
+                  ["LINKEDIN", "X THREADS", "SHORTS", "TIKTOKS", "CTA BANK", "HOOK BANK"],
+              )
+              linkedin_path = save_file(f"social/linkedin/{story_slug}-linkedin.md", social_sections["LINKEDIN"])
+              x_threads_path = save_file(f"social/x-threads/{story_slug}-x-threads.md", social_sections["X THREADS"])
+              shorts_path = save_file(f"video/shorts/{story_slug}-shorts.md", social_sections["SHORTS"])
+              tiktoks_path = save_file(f"video/tiktoks/{story_slug}-tiktoks.md", social_sections["TIKTOKS"])
+              banks_path = save_file(f"social/{story_slug}-cta-hook-bank.md", social_sections["CTA BANK"] + "\n\n" + social_sections["HOOK BANK"])
 
-          visual_bundle = call_model(
-              "visual briefs",
-              compose(
-                  f"""
-                  Today's UTC date is {run_date}. Target slug: {story_slug}.
+              visual_bundle = call_model(
+                  "visual briefs",
+                  compose(
+                      f"""
+                      Today's UTC date is {run_date}. Target slug: {story_slug}.
 
-                  Repository rules:
-                  {repo_rules}
+                      Repository rules:
+                      {repo_rules}
 
-                  Approved investigation:
-                  {draft}
+                      Approved investigation:
+                      {draft}
 
-                  Return markdown with these exact top-level headings only:
-                  # THUMBNAIL BRIEF
-                  # SOCIAL IMAGE BRIEF
-                  """
-              ),
-          )
-          visual_sections = split_sections(visual_bundle, ["THUMBNAIL BRIEF", "SOCIAL IMAGE BRIEF"])
-          thumbnail_path = save_file(f"assets/thumbnails/{story_slug}-thumbnail-brief.md", visual_sections["THUMBNAIL BRIEF"])
-          social_brief_path = save_file(f"assets/social/{story_slug}-social-brief.md", visual_sections["SOCIAL IMAGE BRIEF"])
+                      Return markdown with these exact top-level headings only:
+                      # THUMBNAIL BRIEF
+                      # SOCIAL IMAGE BRIEF
+                      """
+                  ),
+              )
+              visual_sections = split_sections(visual_bundle, ["THUMBNAIL BRIEF", "SOCIAL IMAGE BRIEF"])
+              thumbnail_path = save_file(f"assets/thumbnails/{story_slug}-thumbnail-brief.md", visual_sections["THUMBNAIL BRIEF"])
+              social_brief_path = save_file(f"assets/social/{story_slug}-social-brief.md", visual_sections["SOCIAL IMAGE BRIEF"])
 
-          prompt_pad = call_model(
-              "prompt pad",
-              compose(
-                  f"""
-                  Today's UTC date is {run_date}. Target slug: {story_slug}.
+              prompt_pad = call_model(
+                  "prompt pad",
+                  compose(
+                      f"""
+                      Today's UTC date is {run_date}. Target slug: {story_slug}.
 
-                  Approved investigation:
-                  {draft}
+                      Approved investigation:
+                      {draft}
 
-                  Create a reusable prompt pad for follow-up reporting, interviews, fact-checking, and derivative content on this story.
-                  Return markdown only for /prompt-pads/{story_slug}-prompt-pad.md.
-                  """
-              ),
-          )
-          prompt_pad_path = save_file(f"prompt-pads/{story_slug}-prompt-pad.md", prompt_pad)
+                      Create a reusable prompt pad for follow-up reporting, interviews, fact-checking, and derivative content on this story.
+                      Return markdown only for /prompt-pads/{story_slug}-prompt-pad.md.
+                      """
+                  ),
+              )
+              prompt_pad_path = save_file(f"prompt-pads/{story_slug}-prompt-pad.md", prompt_pad)
 
-          package_report = call_model(
-              "package verification",
-              compose(
-                  f"""
-                  Today's UTC date is {run_date}. Target slug: {story_slug}.
+              package_report = call_model(
+                  "package verification",
+                  compose(
+                      f"""
+                      Today's UTC date is {run_date}. Target slug: {story_slug}.
 
-                  Repository rules:
-                  {repo_rules}
+                      Repository rules:
+                      {repo_rules}
 
-                  Investigation:
-                  {draft}
+                      Investigation:
+                      {draft}
 
-                  Newsletter:
-                  {newsletter}
+                      Newsletter:
+                      {newsletter}
 
-                  LinkedIn:
-                  {social_sections['LINKEDIN']}
+                      LinkedIn:
+                      {social_sections['LINKEDIN']}
 
-                  X Threads:
-                  {social_sections['X THREADS']}
+                      X Threads:
+                      {social_sections['X THREADS']}
 
-                  Shorts:
-                  {social_sections['SHORTS']}
+                      Shorts:
+                      {social_sections['SHORTS']}
 
-                  TikToks:
-                  {social_sections['TIKTOKS']}
+                      TikToks:
+                      {social_sections['TIKTOKS']}
 
-                  Thumbnail brief:
-                  {visual_sections['THUMBNAIL BRIEF']}
+                      Thumbnail brief:
+                      {visual_sections['THUMBNAIL BRIEF']}
 
-                  Social image brief:
-                  {visual_sections['SOCIAL IMAGE BRIEF']}
+                      Social image brief:
+                      {visual_sections['SOCIAL IMAGE BRIEF']}
 
-                  Prompt pad:
-                  {prompt_pad}
+                      Prompt pad:
+                      {prompt_pad}
 
-                  Return markdown only for /publishing/reports/{story_slug}-package-verification-report.md.
-                  End the report with these exact lines:
-                  FINAL GRADE: <A|B|C|D>
-                  FINAL DECISION: <PUBLISH|HOLD|REJECT>
-                  """
-              ),
-          )
-          package_report_path = save_file(f"publishing/reports/{story_slug}-package-verification-report.md", package_report)
-          package_decision = parse_decision(package_report)
-          if package_decision != "PUBLISH":
-              raise SystemExit(f"Package gate returned {package_decision}. Stopping pipeline.")
+                      Return markdown only for /publishing/reports/{story_slug}-package-verification-report.md.
+                      End the report with these exact lines:
+                      FINAL GRADE: <A|B|C|D>
+                      FINAL DECISION: <PUBLISH|HOLD|REJECT>
+                      """
+                  ),
+              )
+              package_report_path = save_file(f"publishing/reports/{story_slug}-package-verification-report.md", package_report)
+              status_payload["package_decision"] = parse_decision(package_report)
 
-          metadata = call_model(
-              "metadata package",
-              compose(
-                  f"""
-                  Target slug: {story_slug}.
-                  Using the approved investigation and both verification reports, create publication metadata.
-                  Return markdown only with the heading '# Publication Metadata' and fields for title, slug, deck, author, content type, status, prepared date, draft verification, package verification, estimated reading time, primary category, secondary categories, featured-image alt text, and disclosure.
+              if status_payload["package_decision"] != "PUBLISH":
+                  status_payload["pipeline_status"] = f"stopped-after-package-{status_payload['package_decision'].lower()}"
+              else:
+                  metadata = call_model(
+                      "metadata package",
+                      compose(
+                          f"""
+                          Target slug: {story_slug}.
+                          Using the approved investigation and both verification reports, create publication metadata.
+                          Return markdown only with the heading '# Publication Metadata' and fields for title, slug, deck, author, content type, status, prepared date, draft verification, package verification, estimated reading time, primary category, secondary categories, featured-image alt text, and disclosure.
 
-                  Investigation:
-                  {draft}
+                          Investigation:
+                          {draft}
 
-                  Draft verification report:
-                  {draft_report}
+                          Draft verification report:
+                          {draft_report}
 
-                  Package verification report:
-                  {package_report}
-                  """
-              ),
-          )
+                          Package verification report:
+                          {package_report}
+                          """
+                      ),
+                  )
 
-          seo = call_model(
-              "seo package",
-              compose(
-                  f"""
-                  Target slug: {story_slug}.
-                  Create an SEO/GEO package for the approved investigation.
-                  Return markdown only with the heading '# SEO Package' and sections for title options, GEO title, meta description, slug, tags, categories, schema suggestions, and internal-link ideas.
+                  seo = call_model(
+                      "seo package",
+                      compose(
+                          f"""
+                          Target slug: {story_slug}.
+                          Create an SEO/GEO package for the approved investigation.
+                          Return markdown only with the heading '# SEO Package' and sections for title options, GEO title, meta description, slug, tags, categories, schema suggestions, and internal-link ideas.
 
-                  Investigation:
-                  {draft}
-                  """
-              ),
-          )
+                          Investigation:
+                          {draft}
+                          """
+                      ),
+                  )
 
-          youtube = call_model(
-              "youtube package",
-              compose(
-                  f"""
-                  Target slug: {story_slug}.
-                  Create a YouTube package for the approved investigation.
-                  Return markdown only with the heading '# YouTube Package' and sections for title options, description, chapter suggestions, tags, and thumbnail recommendations.
+                  youtube = call_model(
+                      "youtube package",
+                      compose(
+                          f"""
+                          Target slug: {story_slug}.
+                          Create a YouTube package for the approved investigation.
+                          Return markdown only with the heading '# YouTube Package' and sections for title options, description, chapter suggestions, tags, and thumbnail recommendations.
 
-                  Investigation:
-                  {draft}
+                          Investigation:
+                          {draft}
 
-                  Thumbnail brief:
-                  {visual_sections['THUMBNAIL BRIEF']}
-                  """
-              ),
-          )
+                          Thumbnail brief:
+                          {visual_sections['THUMBNAIL BRIEF']}
+                          """
+                      ),
+                  )
 
-          distribution = call_model(
-              "distribution package",
-              compose(
-                  f"""
-                  Target slug: {story_slug}.
-                  Create a package-only distribution schedule. Do not authorize publication.
-                  Return markdown only with the heading '# Distribution Plan' and a schedule covering Day 0 through Day 7 plus prepublication requirements.
+                  distribution = call_model(
+                      "distribution package",
+                      compose(
+                          f"""
+                          Target slug: {story_slug}.
+                          Create a package-only distribution schedule. Do not authorize publication.
+                          Return markdown only with the heading '# Distribution Plan' and a schedule covering Day 0 through Day 7 plus prepublication requirements.
 
-                  Investigation:
-                  {draft}
+                          Investigation:
+                          {draft}
 
-                  Newsletter:
-                  {newsletter}
+                          Newsletter:
+                          {newsletter}
 
-                  Social summaries:
-                  {social_sections['LINKEDIN']}
-                  """
-              ),
-          )
+                          Social summaries:
+                          {social_sections['LINKEDIN']}
+                          """
+                      ),
+                  )
 
-          executive_summary = call_model(
-              "executive summary",
-              compose(
-                  f"""
-                  Target slug: {story_slug}.
-                  Create an executive summary for the approved package.
-                  Return markdown only with the heading '# Executive Summary' and sections for story name, publication status, asset count, distribution schedule, future follow-ups, and unresolved limitations.
+                  executive_summary = call_model(
+                      "executive summary",
+                      compose(
+                          f"""
+                          Target slug: {story_slug}.
+                          Create an executive summary for the approved package.
+                          Return markdown only with the heading '# Executive Summary' and sections for story name, publication status, asset count, distribution schedule, future follow-ups, and unresolved limitations.
 
-                  Investigation:
-                  {draft}
+                          Investigation:
+                          {draft}
 
-                  Package verification report:
-                  {package_report}
-                  """
-              ),
-          )
+                          Package verification report:
+                          {package_report}
+                          """
+                      ),
+                  )
 
-          package_dir = next_dir(f"publishing/packages/{story_slug}")
-          package_dir.mkdir(parents=True, exist_ok=True)
+                  package_dir = next_dir(f"publishing/packages/{story_slug}")
+                  package_dir.mkdir(parents=True, exist_ok=True)
 
-          article_final_path = save_file(f"articles/final/{story_slug}.md", draft)
-          newsletter_final_path = save_file(f"newsletter/final/{story_slug}-newsletter.md", newsletter)
-          published_case_file_path = save_file(f"case-files/published/{story_slug}-research-packet.md", research_packet)
+                  article_final_path = save_file(f"articles/final/{story_slug}.md", draft)
+                  newsletter_final_path = save_file(f"newsletter/final/{story_slug}-newsletter.md", newsletter)
+                  published_case_file_path = save_file(f"case-files/published/{story_slug}-research-packet.md", research_packet)
+                  status_payload["archive_eligible"] = True
+                  status_payload["pipeline_status"] = "ready-for-publish-pipeline"
+                  status_payload["package_dir"] = package_dir.relative_to(root).as_posix()
 
-          copies = {
-              "article.md": draft,
-              "newsletter.md": newsletter,
-              "linkedin.md": social_sections["LINKEDIN"],
-              "x-threads.md": social_sections["X THREADS"],
-              "shorts.md": social_sections["SHORTS"],
-              "tiktoks.md": social_sections["TIKTOKS"],
-              "thumbnail-brief.md": visual_sections["THUMBNAIL BRIEF"],
-              "social-brief.md": visual_sections["SOCIAL IMAGE BRIEF"],
-              "prompt-pad.md": prompt_pad,
-              "seo.md": seo,
-              "youtube.md": youtube,
-              "distribution.md": distribution,
-              "executive-summary.md": executive_summary,
-              "metadata.md": metadata,
-              "research-packet.md": research_packet,
-              "draft-verification-report.md": draft_report,
-              "package-verification-report.md": package_report,
-              "validation-report.md": f"# Validation Summary\n\n- Draft gate: {draft_decision}\n- Package gate: {package_decision}\n",
+                  copies = {
+                      "article.md": draft,
+                      "newsletter.md": newsletter,
+                      "linkedin.md": social_sections["LINKEDIN"],
+                      "x-threads.md": social_sections["X THREADS"],
+                      "shorts.md": social_sections["SHORTS"],
+                      "tiktoks.md": social_sections["TIKTOKS"],
+                      "thumbnail-brief.md": visual_sections["THUMBNAIL BRIEF"],
+                      "social-brief.md": visual_sections["SOCIAL IMAGE BRIEF"],
+                      "prompt-pad.md": prompt_pad,
+                      "seo.md": seo,
+                      "youtube.md": youtube,
+                      "distribution.md": distribution,
+                      "executive-summary.md": executive_summary,
+                      "metadata.md": metadata,
+                      "research-packet.md": research_packet,
+                      "draft-verification-report.md": draft_report,
+                      "package-verification-report.md": package_report,
+                      "validation-report.md": (
+                          "# Validation Summary\n\n"
+                          f"- Draft gate: {status_payload['draft_decision']}\n"
+                          f"- Package gate: {status_payload['package_decision']}\n"
+                      ),
+                      "workflow-status.json": json.dumps(status_payload, indent=2),
+                  }
+                  for name, content in copies.items():
+                      (package_dir / name).write_text(content.strip() + "\n", encoding="utf-8")
+
+          status_payload["reports"] = {
+              "draft_verification_report": draft_report_path.relative_to(root).as_posix(),
+              "package_verification_report": package_report_path.relative_to(root).as_posix(),
           }
-          for name, content in copies.items():
-              (package_dir / name).write_text(content.strip() + "\n", encoding="utf-8")
+          status_manifest_path = write_status_manifest(status_payload)
 
           summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
           summary.write_text(
@@ -579,15 +650,19 @@ jobs:
                       f"# Story production complete: {story_slug}",
                       "",
                       f"- Model: `{model}`",
-                      f"- Draft decision: `{draft_decision}`",
-                      f"- Package decision: `{package_decision}`",
+                      f"- Pipeline status: `{status_payload['pipeline_status']}`",
+                      f"- Draft decision: `{status_payload['draft_decision']}`",
+                      f"- Package decision: `{status_payload['package_decision']}`",
+                      f"- Archive eligible: `{'yes' if status_payload['archive_eligible'] else 'no'}`",
                       f"- Research packet: `{research_packet_path.relative_to(root).as_posix()}`",
                       f"- Outline: `{outline_path.relative_to(root).as_posix()}`",
                       f"- Draft: `{draft_path.relative_to(root).as_posix()}`",
-                      f"- Package directory: `{package_dir.relative_to(root).as_posix()}`",
-                      f"- Final article: `{article_final_path.relative_to(root).as_posix()}`",
-                      f"- Final newsletter: `{newsletter_final_path.relative_to(root).as_posix()}`",
-                      f"- Published case file: `{published_case_file_path.relative_to(root).as_posix()}`",
+                      f"- Package verification report: `{package_report_path.relative_to(root).as_posix()}`",
+                      f"- Status manifest: `{status_manifest_path.relative_to(root).as_posix()}`",
+                      f"- Package directory: `{package_dir.relative_to(root).as_posix() if package_dir else 'not created'}`",
+                      f"- Final article: `{article_final_path.relative_to(root).as_posix() if article_final_path else 'not published'}`",
+                      f"- Final newsletter: `{newsletter_final_path.relative_to(root).as_posix() if newsletter_final_path else 'not published'}`",
+                      f"- Published case file: `{published_case_file_path.relative_to(root).as_posix() if published_case_file_path else 'not published'}`",
                   ]
               )
               + "\n",
@@ -597,9 +672,12 @@ jobs:
           output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
           with output.open("a", encoding="utf-8") as handle:
               handle.write(f"story_slug={story_slug}\n")
-              handle.write(f"package_dir={package_dir.relative_to(root).as_posix()}\n")
-              handle.write(f"draft_decision={draft_decision}\n")
-              handle.write(f"package_decision={package_decision}\n")
+              handle.write(f"package_dir={package_dir.relative_to(root).as_posix() if package_dir else ''}\n")
+              handle.write(f"draft_decision={status_payload['draft_decision']}\n")
+              handle.write(f"package_decision={status_payload['package_decision']}\n")
+              handle.write(f"archive_eligible={'true' if status_payload['archive_eligible'] else 'false'}\n")
+              handle.write(f"pipeline_status={status_payload['pipeline_status']}\n")
+              handle.write(f"status_manifest_path={status_manifest_path.relative_to(root).as_posix()}\n")
           PY
 
       - name: Commit generated package assets

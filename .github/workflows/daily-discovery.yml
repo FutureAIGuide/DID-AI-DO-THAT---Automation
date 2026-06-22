@@ -22,6 +22,14 @@ on:
         value: ${{ jobs.discover.outputs.top_story_slug }}
       selected_slugs_json:
         value: ${{ jobs.discover.outputs.selected_slugs_json }}
+      selected_count:
+        value: ${{ jobs.discover.outputs.selected_count }}
+      has_selected_stories:
+        value: ${{ jobs.discover.outputs.has_selected_stories }}
+      selection_status:
+        value: ${{ jobs.discover.outputs.selection_status }}
+      selection_manifest_path:
+        value: ${{ jobs.discover.outputs.selection_manifest_path }}
   workflow_dispatch:
     inputs:
       lookback_days:
@@ -55,6 +63,10 @@ jobs:
       run_date: ${{ steps.generate.outputs.run_date }}
       top_story_slug: ${{ steps.generate.outputs.top_story_slug }}
       selected_slugs_json: ${{ steps.generate.outputs.selected_slugs_json }}
+      selected_count: ${{ steps.generate.outputs.selected_count }}
+      has_selected_stories: ${{ steps.generate.outputs.has_selected_stories }}
+      selection_status: ${{ steps.generate.outputs.selection_status }}
+      selection_manifest_path: ${{ steps.generate.outputs.selection_manifest_path }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -93,7 +105,8 @@ jobs:
               or "anthropic/claude-3.5-sonnet"
           )
           lookback_days = int((os.environ.get("INPUT_LOOKBACK_DAYS") or "30").strip())
-          selection_count = max(1, int((os.environ.get("INPUT_SELECTION_COUNT") or "1").strip()))
+          # Zero is valid so scheduled orchestration can complete cleanly without fan-out.
+          selection_count = max(0, int((os.environ.get("INPUT_SELECTION_COUNT") or "1").strip()))
           run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
           def read(rel):
@@ -315,13 +328,40 @@ jobs:
               flags=re.MULTILINE,
           )
           slugs = top_ten_slugs or top_story_slugs
-          if not slugs:
-              raise SystemExit(
-                  "Could not extract story slugs from OpenRouter output. "
-                  f"Top-10 slug matches: {len(top_ten_slugs)}. Top-story slug matches: {len(top_story_slugs)}."
-              )
-          selected_slugs = slugs[:selection_count]
-          top_story_slug = selected_slugs[0]
+          deduped_slugs = []
+          seen = set()
+          for slug in slugs:
+              if slug not in seen:
+                  deduped_slugs.append(slug)
+                  seen.add(slug)
+
+          selected_slugs = deduped_slugs[:selection_count] if selection_count else []
+          top_story_slug = selected_slugs[0] if selected_slugs else ""
+          selection_status = "selected" if selected_slugs else "no-usable-stories"
+
+          selection_manifest = {
+              "run_date": run_date,
+              "lookback_days": lookback_days,
+              "requested_selection_count": selection_count,
+              "top_ten_slug_count": len(top_ten_slugs),
+              "top_story_slug_count": len(top_story_slugs),
+              "selected_count": len(selected_slugs),
+              "top_story_slug": top_story_slug,
+              "selected_slugs": selected_slugs,
+              "selection_status": selection_status,
+              "source_files": {
+                  "discovery": discovery_path,
+                  "scoring": scoring_path,
+                  "top_ten": top_ten_path,
+                  "top_story": top_story_path,
+                  "editorial_brief": editorial_brief_path,
+              },
+          }
+          selection_manifest_path = next_file(f"research/selected/{run_date}-selection-manifest.json")
+          selection_manifest_path.write_text(
+              json.dumps(selection_manifest, indent=2) + "\n",
+              encoding="utf-8",
+          )
 
           summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
           summary.write_text(
@@ -331,12 +371,15 @@ jobs:
                       "",
                       f"- Model: `{model}`",
                       f"- Lookback days: `{lookback_days}`",
-                      f"- Top story slug: `{top_story_slug}`",
+                      f"- Selection status: `{selection_status}`",
+                      f"- Selected story count: `{len(selected_slugs)}`",
+                      f"- Top story slug: `{top_story_slug or 'none'}`",
                       f"- Discovery file: `{discovery_path}`",
                       f"- Scoring file: `{scoring_path}`",
                       f"- Top-10 file: `{top_ten_path}`",
                       f"- Top-story file: `{top_story_path}`",
                       f"- Editorial brief: `{editorial_brief_path}`",
+                      f"- Selection manifest: `{selection_manifest_path.relative_to(root).as_posix()}`",
                   ]
               )
               + "\n",
@@ -348,6 +391,10 @@ jobs:
               handle.write(f"run_date={run_date}\n")
               handle.write(f"top_story_slug={top_story_slug}\n")
               handle.write(f"selected_slugs_json={json.dumps(selected_slugs)}\n")
+              handle.write(f"selected_count={len(selected_slugs)}\n")
+              handle.write(f"has_selected_stories={'true' if selected_slugs else 'false'}\n")
+              handle.write(f"selection_status={selection_status}\n")
+              handle.write(f"selection_manifest_path={selection_manifest_path.relative_to(root).as_posix()}\n")
           PY
 
       - name: Commit generated discovery assets
