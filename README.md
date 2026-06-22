@@ -26,9 +26,9 @@ A local example is provided in `.env.example`.
 
 ### Workflow Files
 
-- `daily-discovery.yml` — scheduled and manual discovery, scoring, and selection
+- `daily-discovery.yml` — scheduled daily at 13:15 UTC plus manual discovery, scoring, and selection
 - `story-production.yml` — builds one approved story from research packet through publishing package
-- `weekly-production.yml` — runs discovery and then produces the selected weekly stories
+- `weekly-production.yml` — scheduled Mondays at 14:30 UTC to run discovery and then produce the selected weekly stories
 - `publish-pipeline.yml` — validates completed packages and mirrors approved packages into `archive/`
 
 ### Notes

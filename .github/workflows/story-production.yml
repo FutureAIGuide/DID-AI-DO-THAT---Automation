@@ -180,13 +180,20 @@ jobs:
                   start = match.end()
                   end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
                   heading = match.group(1).strip().upper()
-                  sections[heading] = content[match.start():end].strip()
+                  sections[heading] = content[start:end].strip()
               missing = [heading for heading in headings if heading not in sections]
               if missing:
                   raise SystemExit(f"Expected sections not found: {', '.join(missing)}")
               return sections
 
           def parse_decision(report_text):
+              final_line = re.search(
+                  r"^FINAL DECISION:\s*(PUBLISH|HOLD|REJECT)\s*$",
+                  report_text,
+                  flags=re.IGNORECASE | re.MULTILINE,
+              )
+              if final_line:
+                  return final_line.group(1).upper()
               matches = re.findall(r"\b(PUBLISH|HOLD|REJECT)\b", report_text.upper())
               if not matches:
                   raise SystemExit("Could not determine verification decision from report output.")

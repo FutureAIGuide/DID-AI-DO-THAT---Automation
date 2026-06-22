@@ -16,6 +16,7 @@ on:
         required: false
         default: ''
   schedule:
+    # Runs every Monday at 14:30 UTC.
     - cron: '30 14 * * 1'
 
 permissions:
