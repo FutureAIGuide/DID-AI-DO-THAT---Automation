@@ -104,8 +104,8 @@ jobs:
           processed = []
           for package_dir, workflow_status in filtered_package_dirs:
               missing = [name for name in required_files if not (package_dir / name).exists()]
-              draft_report = (package_dir / "draft-verification-report.md").read_text(encoding="utf-8") if (package_dir / "draft-verification-report.md").exists() else ""
-              package_report = (package_dir / "package-verification-report.md").read_text(encoding="utf-8") if (package_dir / "package-verification-report.md").exists() else ""
+              draft_report_present = (package_dir / "draft-verification-report.md").exists()
+              package_report_present = (package_dir / "package-verification-report.md").exists()
               approved = bool(workflow_status.get("archive_eligible")) and not missing
               status = "PUBLISH" if approved else "HOLD"
               report_path = reports_root / f"{package_dir.name}-pipeline-validation-report.md"
@@ -121,8 +121,8 @@ jobs:
                           f"- Draft decision: `{workflow_status.get('draft_decision', '')}`",
                           f"- Package decision: `{workflow_status.get('package_decision', '')}`",
                           f"- Missing files: {', '.join(missing) if missing else 'none'}",
-                          f"- Draft verification present: `{'yes' if draft_report else 'no'}`",
-                          f"- Package verification present: `{'yes' if package_report else 'no'}`",
+                          f"- Draft verification present: `{'yes' if draft_report_present else 'no'}`",
+                          f"- Package verification present: `{'yes' if package_report_present else 'no'}`",
                       ]
                   )
                   + "\n",

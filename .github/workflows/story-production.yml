@@ -363,7 +363,7 @@ jobs:
               package_report = (
                   "# Package verification skipped.\n\n"
                   f"- Reason: Draft gate returned `{status_payload['draft_decision']}`.\n\n"
-                  "FINAL GRADE: D\n"
+                  "FINAL GRADE: SKIPPED\n"
                   f"FINAL DECISION: {status_payload['package_decision']}\n"
               )
               package_report_path.write_text(package_report, encoding="utf-8")
