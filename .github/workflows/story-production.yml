@@ -243,14 +243,24 @@ jobs:
               ]
           )
           compose = lambda value: textwrap.dedent(value).strip()
-          draft_decision = "SKIPPED"
-          package_decision = "SKIPPED"
           package_dir = None
-          archive_eligible = False
-          pipeline_status = "running"
           article_final_path = None
           newsletter_final_path = None
           published_case_file_path = None
+          status_payload = {
+              "story_slug": story_slug,
+              "run_date": run_date,
+              "source_run_id": run_id,
+              "source_run_attempt": run_attempt,
+              "source_workflow": workflow_name,
+              "source_event_name": event_name,
+              "draft_decision": "SKIPPED",
+              "package_decision": "SKIPPED",
+              "archive_eligible": False,
+              "pipeline_status": "running",
+              "package_dir": "",
+              "reports": {},
+          }
 
           research_packet = call_model(
               "research packet",
@@ -335,8 +345,7 @@ jobs:
               ),
           )
           draft_report_path = save_file(f"publishing/reports/{story_slug}-draft-verification-report.md", draft_report)
-          draft_decision = parse_decision(draft_report)
-          package_report = "# Package verification skipped.\n\nFINAL GRADE: D\nFINAL DECISION: HOLD\n"
+          status_payload["draft_decision"] = parse_decision(draft_report)
           package_report_path = root / "publishing/reports" / f"{story_slug}-package-verification-report.md"
           newsletter_path = None
           linkedin_path = None
@@ -348,8 +357,15 @@ jobs:
           social_brief_path = None
           prompt_pad_path = None
 
-          if draft_decision != "PUBLISH":
-              pipeline_status = f"stopped-after-draft-{draft_decision.lower()}"
+          if status_payload["draft_decision"] != "PUBLISH":
+              status_payload["package_decision"] = status_payload["draft_decision"]
+              status_payload["pipeline_status"] = f"stopped-after-draft-{status_payload['draft_decision'].lower()}"
+              package_report = (
+                  "# Package verification skipped.\n\n"
+                  f"- Reason: Draft gate returned `{status_payload['draft_decision']}`.\n\n"
+                  "FINAL GRADE: D\n"
+                  f"FINAL DECISION: {status_payload['package_decision']}\n"
+              )
               package_report_path.write_text(package_report, encoding="utf-8")
           else:
               newsletter = call_model(
@@ -490,10 +506,10 @@ jobs:
                   ),
               )
               package_report_path = save_file(f"publishing/reports/{story_slug}-package-verification-report.md", package_report)
-              package_decision = parse_decision(package_report)
+              status_payload["package_decision"] = parse_decision(package_report)
 
-              if package_decision != "PUBLISH":
-                  pipeline_status = f"stopped-after-package-{package_decision.lower()}"
+              if status_payload["package_decision"] != "PUBLISH":
+                  status_payload["pipeline_status"] = f"stopped-after-package-{status_payload['package_decision'].lower()}"
               else:
                   metadata = call_model(
                       "metadata package",
@@ -589,22 +605,9 @@ jobs:
                   article_final_path = save_file(f"articles/final/{story_slug}.md", draft)
                   newsletter_final_path = save_file(f"newsletter/final/{story_slug}-newsletter.md", newsletter)
                   published_case_file_path = save_file(f"case-files/published/{story_slug}-research-packet.md", research_packet)
-                  archive_eligible = True
-                  pipeline_status = "ready-for-publish-pipeline"
-
-                  workflow_status = {
-                      "story_slug": story_slug,
-                      "run_date": run_date,
-                      "source_run_id": run_id,
-                      "source_run_attempt": run_attempt,
-                      "source_workflow": workflow_name,
-                      "source_event_name": event_name,
-                      "draft_decision": draft_decision,
-                      "package_decision": package_decision,
-                      "archive_eligible": archive_eligible,
-                      "pipeline_status": pipeline_status,
-                      "package_dir": package_dir.relative_to(root).as_posix(),
-                  }
+                  status_payload["archive_eligible"] = True
+                  status_payload["pipeline_status"] = "ready-for-publish-pipeline"
+                  status_payload["package_dir"] = package_dir.relative_to(root).as_posix()
 
                   copies = {
                       "article.md": draft,
@@ -624,28 +627,19 @@ jobs:
                       "research-packet.md": research_packet,
                       "draft-verification-report.md": draft_report,
                       "package-verification-report.md": package_report,
-                      "validation-report.md": f"# Validation Summary\n\n- Draft gate: {draft_decision}\n- Package gate: {package_decision}\n",
-                      "workflow-status.json": json.dumps(workflow_status, indent=2),
+                      "validation-report.md": (
+                          "# Validation Summary\n\n"
+                          f"- Draft gate: {status_payload['draft_decision']}\n"
+                          f"- Package gate: {status_payload['package_decision']}\n"
+                      ),
+                      "workflow-status.json": json.dumps(status_payload, indent=2),
                   }
                   for name, content in copies.items():
                       (package_dir / name).write_text(content.strip() + "\n", encoding="utf-8")
 
-          status_payload = {
-              "story_slug": story_slug,
-              "run_date": run_date,
-              "source_run_id": run_id,
-              "source_run_attempt": run_attempt,
-              "source_workflow": workflow_name,
-              "source_event_name": event_name,
-              "draft_decision": draft_decision,
-              "package_decision": package_decision,
-              "archive_eligible": archive_eligible,
-              "pipeline_status": pipeline_status,
-              "package_dir": package_dir.relative_to(root).as_posix() if package_dir else "",
-              "reports": {
-                  "draft_verification_report": draft_report_path.relative_to(root).as_posix(),
-                  "package_verification_report": package_report_path.relative_to(root).as_posix(),
-              },
+          status_payload["reports"] = {
+              "draft_verification_report": draft_report_path.relative_to(root).as_posix(),
+              "package_verification_report": package_report_path.relative_to(root).as_posix(),
           }
           status_manifest_path = write_status_manifest(status_payload)
 
@@ -656,10 +650,10 @@ jobs:
                       f"# Story production complete: {story_slug}",
                       "",
                       f"- Model: `{model}`",
-                      f"- Pipeline status: `{pipeline_status}`",
-                      f"- Draft decision: `{draft_decision}`",
-                      f"- Package decision: `{package_decision}`",
-                      f"- Archive eligible: `{'yes' if archive_eligible else 'no'}`",
+                      f"- Pipeline status: `{status_payload['pipeline_status']}`",
+                      f"- Draft decision: `{status_payload['draft_decision']}`",
+                      f"- Package decision: `{status_payload['package_decision']}`",
+                      f"- Archive eligible: `{'yes' if status_payload['archive_eligible'] else 'no'}`",
                       f"- Research packet: `{research_packet_path.relative_to(root).as_posix()}`",
                       f"- Outline: `{outline_path.relative_to(root).as_posix()}`",
                       f"- Draft: `{draft_path.relative_to(root).as_posix()}`",
@@ -679,10 +673,10 @@ jobs:
           with output.open("a", encoding="utf-8") as handle:
               handle.write(f"story_slug={story_slug}\n")
               handle.write(f"package_dir={package_dir.relative_to(root).as_posix() if package_dir else ''}\n")
-              handle.write(f"draft_decision={draft_decision}\n")
-              handle.write(f"package_decision={package_decision}\n")
-              handle.write(f"archive_eligible={'true' if archive_eligible else 'false'}\n")
-              handle.write(f"pipeline_status={pipeline_status}\n")
+              handle.write(f"draft_decision={status_payload['draft_decision']}\n")
+              handle.write(f"package_decision={status_payload['package_decision']}\n")
+              handle.write(f"archive_eligible={'true' if status_payload['archive_eligible'] else 'false'}\n")
+              handle.write(f"pipeline_status={status_payload['pipeline_status']}\n")
               handle.write(f"status_manifest_path={status_manifest_path.relative_to(root).as_posix()}\n")
           PY
 
