@@ -95,9 +95,27 @@ jobs:
           from datetime import datetime, timezone
 
           root = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
           api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
           if not api_key:
-              raise SystemExit("OPENROUTER_API_KEY secret is required.")
+              summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+              summary.write_text(
+                  "# Daily discovery skipped\n\n"
+                  "- Reason: `OPENROUTER_API_KEY` secret is not configured.\n"
+                  "- Action required: Add the `OPENROUTER_API_KEY` secret under "
+                  "**Settings → Secrets and variables → Actions** in the repository.\n",
+                  encoding="utf-8",
+              )
+              output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+              with output.open("a", encoding="utf-8") as handle:
+                  handle.write(f"run_date={run_date}\n")
+                  handle.write("top_story_slug=\n")
+                  handle.write("selected_slugs_json=[]\n")
+                  handle.write("selected_count=0\n")
+                  handle.write("has_selected_stories=false\n")
+                  handle.write("selection_status=skipped-no-api-key\n")
+                  handle.write("selection_manifest_path=\n")
+              raise SystemExit(0)
 
           model = (
               os.environ.get("INPUT_MODEL", "").strip()
@@ -107,7 +125,6 @@ jobs:
           lookback_days = int((os.environ.get("INPUT_LOOKBACK_DAYS") or "30").strip())
           # Zero is valid so scheduled orchestration can complete cleanly without fan-out.
           selection_count = max(0, int((os.environ.get("INPUT_SELECTION_COUNT") or "1").strip()))
-          run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
           def read(rel):
               return (root / rel).read_text(encoding="utf-8")
