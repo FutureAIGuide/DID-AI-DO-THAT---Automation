@@ -90,7 +90,25 @@ jobs:
 
           api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
           if not api_key:
-              raise SystemExit("OPENROUTER_API_KEY secret is required.")
+              summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+              summary.write_text(
+                  "# Story production skipped\n\n"
+                  f"- Story slug: `{story_slug}`\n"
+                  "- Reason: `OPENROUTER_API_KEY` secret is not configured.\n"
+                  "- Action required: Add the `OPENROUTER_API_KEY` secret under "
+                  "**Settings → Secrets and variables → Actions** in the repository.\n",
+                  encoding="utf-8",
+              )
+              output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+              with output.open("a", encoding="utf-8") as handle:
+                  handle.write(f"story_slug={story_slug}\n")
+                  handle.write("package_dir=\n")
+                  handle.write("draft_decision=skipped-no-api-key\n")
+                  handle.write("package_decision=skipped-no-api-key\n")
+                  handle.write("archive_eligible=false\n")
+                  handle.write("pipeline_status=skipped-no-api-key\n")
+                  handle.write("status_manifest_path=\n")
+              raise SystemExit(0)
 
           model = (
               os.environ.get("INPUT_MODEL", "").strip()
