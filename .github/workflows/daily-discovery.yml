@@ -89,12 +89,14 @@ jobs:
           import os
           import pathlib
           import re
-          import urllib.error
-          import urllib.request
+          import sys
           import textwrap
           from datetime import datetime, timezone
 
           root = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          sys.path.insert(0, str(root / "scripts"))
+          import dadt_common as dc
+
           run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
           api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
           if not api_key:
@@ -120,7 +122,7 @@ jobs:
           model = (
               os.environ.get("INPUT_MODEL", "").strip()
               or os.environ.get("DEFAULT_OPENROUTER_MODEL", "").strip()
-              or "anthropic/claude-3.5-sonnet"
+              or dc.DEFAULT_MODEL
           )
           lookback_days = int((os.environ.get("INPUT_LOOKBACK_DAYS") or "30").strip())
           # Zero is valid so scheduled orchestration can complete cleanly without fan-out.
@@ -129,81 +131,17 @@ jobs:
           def read(rel):
               return (root / rel).read_text(encoding="utf-8")
 
-          def next_file(rel):
-              path = root / rel
-              path.parent.mkdir(parents=True, exist_ok=True)
-              if not path.exists():
-                  return path
-              stem, suffix = path.stem, path.suffix
-              index = 2
-              while True:
-                  candidate = path.with_name(f"{stem}-{index:02d}{suffix}")
-                  if not candidate.exists():
-                      return candidate
-                  index += 1
-
           def save(rel, content):
-              path = next_file(rel)
-              cleaned = content.strip() + "\n"
-              path.write_text(cleaned, encoding="utf-8")
+              path = dc.save_file(root, rel, content)
               return path.relative_to(root).as_posix()
 
-          def render_text(content):
-              if isinstance(content, str):
-                  return content
-              if isinstance(content, list):
-                  parts = []
-                  for item in content:
-                      if isinstance(item, dict):
-                          parts.append(item.get("text", ""))
-                      else:
-                          parts.append(str(item))
-                  return "".join(parts)
-              return str(content)
-
-          referer = os.environ.get("OPENROUTER_SITE_URL", "").strip()
-          title = os.environ.get("OPENROUTER_SITE_NAME", "DID AI DO THAT?! Automation").strip()
-
-          def call_model(label, prompt):
-              payload = {
-                  "model": model,
-                  "messages": [
-                      {
-                          "role": "system",
-                          "content": (
-                              "You are an evidence-first automation agent for the DID AI DO THAT?! repository. "
-                              "Follow repository rules exactly. Never fabricate sources, quotes, documents, laws, people, dates, or statistics. "
-                              "Return markdown only unless JSON is explicitly requested."
-                          ),
-                      },
-                      {"role": "user", "content": prompt},
-                  ],
-                  "temperature": 0.2,
-              }
-              headers = {
-                  "Authorization": "Bearer " + api_key,
-                  "Content-Type": "application/json",
-              }
-              if referer:
-                  headers["HTTP-Referer"] = referer
-              if title:
-                  headers["X-Title"] = title
-              request = urllib.request.Request(
-                  "https://openrouter.ai/api/v1/chat/completions",
-                  data=json.dumps(payload).encode("utf-8"),
-                  headers=headers,
-                  method="POST",
-              )
-              try:
-                  with urllib.request.urlopen(request, timeout=300) as response:
-                      body = json.loads(response.read().decode("utf-8"))
-              except urllib.error.HTTPError as exc:
-                  detail = exc.read().decode("utf-8", errors="replace")
-                  raise SystemExit(f"OpenRouter request failed during {label}: {exc.code} {detail}")
-              except urllib.error.URLError as exc:
-                  raise SystemExit(f"OpenRouter request failed during {label}: {exc}")
-              content = body["choices"][0]["message"]["content"]
-              return render_text(content).strip()
+          client = dc.OpenRouterClient(
+              api_key=api_key,
+              model=model,
+              referer=os.environ.get("OPENROUTER_SITE_URL", "").strip(),
+              title=os.environ.get("OPENROUTER_SITE_NAME", "DID AI DO THAT?! Automation").strip(),
+          )
+          call_model = client.call
 
           repo_context = "\n\n".join(
               [
@@ -374,7 +312,7 @@ jobs:
                   "editorial_brief": editorial_brief_path,
               },
           }
-          selection_manifest_path = next_file(f"research/selected/{run_date}-selection-manifest.json")
+          selection_manifest_path = dc.next_file(root, f"research/selected/{run_date}-selection-manifest.json")
           selection_manifest_path.write_text(
               json.dumps(selection_manifest, indent=2) + "\n",
               encoding="utf-8",
@@ -415,13 +353,7 @@ jobs:
           PY
 
       - name: Commit generated discovery assets
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add research/incoming research/scored research/selected
-          if git diff --cached --quiet; then
-            echo "No discovery changes to commit."
-            exit 0
-          fi
-          git commit -m "Add daily discovery outputs for ${{ steps.generate.outputs.run_date }}"
-          git push
+        uses: ./.github/actions/commit-and-push
+        with:
+          paths: research/incoming research/scored research/selected
+          message: "Add daily discovery outputs for ${{ steps.generate.outputs.run_date }}"

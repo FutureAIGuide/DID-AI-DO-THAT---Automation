@@ -39,6 +39,27 @@ A local example is provided in `.env.example`.
 - Story production always writes verification reports and workflow status metadata, but it stops before packaging/final publishing when a gate returns `HOLD` or `REJECT`.
 - The publish pipeline only considers packages marked archive-eligible by the workflow run that triggered it.
 
+### Shared automation internals
+
+- `scripts/dadt_common.py` holds the OpenRouter client (with retry/backoff on
+  429/5xx and a `max_tokens` cost guard) and the file/report helpers
+  (`save_file`, `next_dir`, `split_sections`, `parse_decision`, `write_json`)
+  used by all three workflows. It's imported at runtime from the checked-out
+  workspace, and it's unit tested in `scripts/tests/`.
+- `.github/actions/commit-and-push` is a composite action that stages,
+  commits, and pushes with fetch/rebase retries. Weekly production can fan
+  out several `story-production` matrix jobs in parallel, and they all push
+  to the same branch — this action prevents non-fast-forward push failures
+  instead of letting a job fail outright on a race.
+- `.github/workflows/ci-lint.yml` runs `actionlint` and the `scripts/tests`
+  pytest suite on any PR touching workflows, composite actions, or scripts,
+  so YAML/Python mistakes are caught before they can burn OpenRouter budget
+  in a scheduled run.
+- Override `OPENROUTER_MAX_TOKENS` (default `8000`) and
+  `OPENROUTER_DRAFT_MAX_TOKENS` (default `16000`, used only for the
+  3500–4500 word article draft) as repository variables to tune cost vs.
+  truncation risk.
+
 ## Workflow
 
 1. Topic Hunter discovers candidate stories.

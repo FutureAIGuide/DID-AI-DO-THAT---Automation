@@ -1,0 +1,63 @@
+name: Commit and push with retry
+description: >
+  Stages the given paths, commits if there are changes, and pushes with
+  fetch/rebase retries so concurrent story-production jobs writing to the
+  same branch don't fail on non-fast-forward pushes.
+
+inputs:
+  paths:
+    description: Space-separated list of paths to `git add`.
+    required: true
+  message:
+    description: Commit message.
+    required: true
+  max_attempts:
+    description: Maximum push attempts before failing.
+    required: false
+    default: '6'
+
+runs:
+  using: composite
+  steps:
+    - name: Commit and push (retry on race with other jobs)
+      shell: bash
+      env:
+        COMMIT_PATHS: ${{ inputs.paths }}
+        COMMIT_MESSAGE: ${{ inputs.message }}
+        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+      run: |
+        set -euo pipefail
+
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+        # shellcheck disable=SC2086
+        git add $COMMIT_PATHS
+
+        if git diff --cached --quiet; then
+          echo "No changes to commit."
+          exit 0
+        fi
+
+        git commit -m "$COMMIT_MESSAGE"
+
+        branch="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}}"
+
+        attempt=1
+        until git push origin "HEAD:${branch}"; do
+          if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+            echo "::error::git push failed after ${attempt} attempts (branch: ${branch})."
+            exit 1
+          fi
+          echo "Push rejected (likely a concurrent job). Fetch + rebase, attempt ${attempt}/${MAX_ATTEMPTS}..."
+          sleep $(( attempt * 5 + RANDOM % 5 ))
+          git fetch origin "$branch"
+          if ! git rebase "origin/${branch}"; then
+            echo "::error::Rebase onto origin/${branch} failed; manual intervention required."
+            git rebase --abort || true
+            exit 1
+          fi
+          attempt=$((attempt + 1))
+        done
+
+        echo "Pushed after ${attempt} attempt(s)."

@@ -71,21 +71,23 @@ jobs:
           DEFAULT_OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
           OPENROUTER_SITE_URL: ${{ vars.OPENROUTER_SITE_URL }}
           OPENROUTER_SITE_NAME: ${{ vars.OPENROUTER_SITE_NAME }}
+          OPENROUTER_MAX_TOKENS: ${{ vars.OPENROUTER_MAX_TOKENS }}
+          OPENROUTER_DRAFT_MAX_TOKENS: ${{ vars.OPENROUTER_DRAFT_MAX_TOKENS }}
         run: |
           python <<'PY'
           import json
           import os
           import pathlib
-          import re
-          import shutil
-          import urllib.error
-          import urllib.request
+          import sys
           import textwrap
           from datetime import datetime, timezone
 
           root = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          sys.path.insert(0, str(root / "scripts"))
+          import dadt_common as dc
+
           story_slug = os.environ["STORY_SLUG"].strip()
-          if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", story_slug):
+          if not dc.is_valid_slug(story_slug):
               raise SystemExit(f"Invalid story slug: {story_slug}")
 
           api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -113,128 +115,45 @@ jobs:
           model = (
               os.environ.get("INPUT_MODEL", "").strip()
               or os.environ.get("DEFAULT_OPENROUTER_MODEL", "").strip()
-              or "anthropic/claude-3.5-sonnet"
+              or dc.DEFAULT_MODEL
           )
           run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
           run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
           run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "").strip()
           workflow_name = os.environ.get("GITHUB_WORKFLOW", "").strip()
           event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip()
-          referer = os.environ.get("OPENROUTER_SITE_URL", "").strip()
-          title = os.environ.get("OPENROUTER_SITE_NAME", "DID AI DO THAT?! Automation").strip()
 
           def read(rel):
               return (root / rel).read_text(encoding="utf-8")
 
-          def render_text(content):
-              if isinstance(content, str):
-                  return content
-              if isinstance(content, list):
-                  return "".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
-              return str(content)
-
-          def call_model(label, prompt):
-              payload = {
-                  "model": model,
-                  "messages": [
-                      {
-                          "role": "system",
-                          "content": (
-                              "You are an evidence-first automation agent for the DID AI DO THAT?! repository. "
-                              "Never fabricate sources, citations, dates, people, organizations, or legal claims. "
-                              "Return markdown only unless JSON is explicitly requested."
-                          ),
-                      },
-                      {"role": "user", "content": prompt},
-                  ],
-                  "temperature": 0.2,
-              }
-              headers = {
-                  "Authorization": "Bearer " + api_key,
-                  "Content-Type": "application/json",
-              }
-              if referer:
-                  headers["HTTP-Referer"] = referer
-              if title:
-                  headers["X-Title"] = title
-              request = urllib.request.Request(
-                  "https://openrouter.ai/api/v1/chat/completions",
-                  data=json.dumps(payload).encode("utf-8"),
-                  headers=headers,
-                  method="POST",
-              )
-              try:
-                  with urllib.request.urlopen(request, timeout=300) as response:
-                      body = json.loads(response.read().decode("utf-8"))
-              except urllib.error.HTTPError as exc:
-                  detail = exc.read().decode("utf-8", errors="replace")
-                  raise SystemExit(f"OpenRouter request failed during {label}: {exc.code} {detail}")
-              except urllib.error.URLError as exc:
-                  raise SystemExit(f"OpenRouter request failed during {label}: {exc}")
-              return render_text(body["choices"][0]["message"]["content"]).strip()
+          client = dc.OpenRouterClient(
+              api_key=api_key,
+              model=model,
+              referer=os.environ.get("OPENROUTER_SITE_URL", "").strip(),
+              title=os.environ.get("OPENROUTER_SITE_NAME", "DID AI DO THAT?! Automation").strip(),
+              max_tokens=int((os.environ.get("OPENROUTER_MAX_TOKENS") or "").strip() or dc.DEFAULT_MAX_TOKENS),
+              system_prompt=(
+                  "You are an evidence-first automation agent for the DID AI DO THAT?! repository. "
+                  "Never fabricate sources, citations, dates, people, organizations, or legal claims. "
+                  "Return markdown only unless JSON is explicitly requested."
+              ),
+          )
+          call_model = client.call
 
           def next_file(rel):
-              path = root / rel
-              path.parent.mkdir(parents=True, exist_ok=True)
-              if not path.exists():
-                  return path
-              stem, suffix = path.stem, path.suffix
-              index = 2
-              while True:
-                  candidate = path.with_name(f"{stem}-{index:02d}{suffix}")
-                  if not candidate.exists():
-                      return candidate
-                  index += 1
+              return dc.next_file(root, rel)
 
           def next_dir(rel):
-              path = root / rel
-              path.parent.mkdir(parents=True, exist_ok=True)
-              if not path.exists():
-                  return path
-              index = 2
-              while True:
-                  candidate = path.parent / f"{path.name}-{index:02d}"
-                  if not candidate.exists():
-                      return candidate
-                  index += 1
+              return dc.next_dir(root, rel)
 
           def save_file(rel, content):
-              path = next_file(rel)
-              path.write_text(content.strip() + "\n", encoding="utf-8")
-              return path
+              return dc.save_file(root, rel, content)
 
-          def split_sections(content, headings):
-              pattern = re.compile(r"^#\s+(.+?)\s*$", flags=re.MULTILINE)
-              matches = list(pattern.finditer(content))
-              sections = {}
-              for index, match in enumerate(matches):
-                  start = match.end()
-                  end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
-                  heading = match.group(1).strip().upper()
-                  sections[heading] = content[start:end].strip()
-              missing = [heading for heading in headings if heading not in sections]
-              if missing:
-                  raise SystemExit(f"Expected sections not found: {', '.join(missing)}")
-              return sections
-
-          def parse_decision(report_text):
-              final_line = re.search(
-                  r"^FINAL DECISION:\s*(PUBLISH|HOLD|REJECT)\s*$",
-                  report_text,
-                  flags=re.IGNORECASE | re.MULTILINE,
-              )
-              if final_line:
-                  return final_line.group(1).upper()
-              matches = re.findall(r"\b(PUBLISH|HOLD|REJECT)\b", report_text.upper())
-              if not matches:
-                  raise SystemExit("Could not determine verification decision from report output.")
-              return matches[-1]
+          split_sections = dc.split_sections
+          parse_decision = dc.parse_decision
 
           def write_status_manifest(status_payload):
-              path = root / "publishing/reports" / f"{story_slug}-workflow-status.json"
-              path.parent.mkdir(parents=True, exist_ok=True)
-              path.write_text(json.dumps(status_payload, indent=2) + "\n", encoding="utf-8")
-              return path
+              return dc.write_json(root / "publishing/reports" / f"{story_slug}-workflow-status.json", status_payload)
 
           selected_files = sorted((root / "research/selected").glob("*.md"))
           relevant_selected = []
@@ -337,6 +256,7 @@ jobs:
                   Write a 3500-4500 word investigative article with sourced claims and explicit uncertainty.
                   """
               ),
+              max_tokens=int((os.environ.get("OPENROUTER_DRAFT_MAX_TOKENS") or "").strip() or "16000"),
           )
           draft_path = save_file(f"articles/drafts/{story_slug}-draft.md", draft)
 
@@ -699,13 +619,7 @@ jobs:
           PY
 
       - name: Commit generated package assets
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add case-files articles newsletter social video assets prompt-pads publishing
-          if git diff --cached --quiet; then
-            echo "No production changes to commit."
-            exit 0
-          fi
-          git commit -m "Build story package for ${{ steps.generate.outputs.story_slug }}"
-          git push
+        uses: ./.github/actions/commit-and-push
+        with:
+          paths: case-files articles newsletter social video assets prompt-pads publishing
+          message: "Build story package for ${{ steps.generate.outputs.story_slug }}"
