@@ -4,7 +4,28 @@ This repository defines the editorial agents, prompts, workflows, templates, and
 
 ## Quick Start
 
+### Automated Production (GitHub Actions)
+
 For zero-touch automation, use `.github/workflows/weekly-production.yml` as the main entry point. It runs discovery, fans out story production for every selected slug, and lets the publish pipeline archive only approved packages afterward.
+
+### Orchestrated Production (New!)
+
+Use the **Workflow Orchestrator** for enhanced automation with intelligent retry logic, parallel execution, and state tracking:
+
+```bash
+# Single story with automatic retries
+python scripts/workflow_cli.py produce my-story-slug
+
+# Multiple stories in parallel
+python scripts/workflow_cli.py produce-batch "story-1,story-2,story-3" --max-parallel 3
+
+# Check status
+python scripts/workflow_cli.py status
+```
+
+See [Workflow Orchestrator Documentation](docs/WORKFLOW_ORCHESTRATOR.md) and [Quick Start Guide](docs/ORCHESTRATOR_QUICKSTART.md) for details.
+
+### Manual/Iterative Workflow
 
 For local prompting and iterative workflow authoring, start from:
 

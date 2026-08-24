@@ -1,0 +1,100 @@
+name: Workflow monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run every hour to check workflow health
+    - cron: '0 * * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check workflow status
+        run: |
+          python scripts/workflow_cli.py status --json > /tmp/workflow-status.json
+          cat /tmp/workflow-status.json
+
+      - name: Generate monitoring report
+        run: |
+          python <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          
+          status_file = Path("/tmp/workflow-status.json")
+          if not status_file.exists():
+              print("No workflow state found")
+              exit(0)
+          
+          status = json.loads(status_file.read_text())
+          
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          lines = [
+              "# Workflow Health Monitor",
+              "",
+              f"**Total workflows tracked:** {status['total']}",
+              "",
+          ]
+          
+          by_status = status.get('by_status', {})
+          running = by_status.get('running', 0)
+          failed = by_status.get('failed', 0)
+          success = by_status.get('success', 0)
+          
+          health_icon = "🟢"
+          if failed > 5:
+              health_icon = "🔴"
+          elif failed > 0 or running > 10:
+              health_icon = "🟡"
+          
+          lines.extend([
+              f"## Health Status: {health_icon}",
+              "",
+              f"- ✅ Successful: {success}",
+              f"- 🔄 Running: {running}",
+              f"- ❌ Failed: {failed}",
+              "",
+          ])
+          
+          if failed > 0:
+              lines.extend([
+                  "## ⚠️ Failed Workflows",
+                  "",
+                  f"There are {failed} failed workflows that may need attention.",
+                  "",
+                  "To retry failed workflows, run:",
+                  "```bash",
+                  "python scripts/workflow_cli.py retry",
+                  "```",
+                  "",
+              ])
+          
+          if running > 10:
+              lines.extend([
+                  "## ⚠️ High Concurrency",
+                  "",
+                  f"There are {running} workflows currently running.",
+                  "Consider monitoring resource usage and queue depth.",
+                  "",
+              ])
+          
+          summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          
+          # Exit with error if too many failures
+          if failed > 10:
+              print(f"ERROR: Too many failed workflows ({failed})")
+              exit(1)
+          PY
