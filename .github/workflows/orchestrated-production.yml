@@ -1,0 +1,146 @@
+name: Orchestrated story production
+
+on:
+  workflow_dispatch:
+    inputs:
+      story_slugs:
+        description: Comma-separated story slugs to produce
+        required: true
+        type: string
+      max_parallel:
+        description: Maximum parallel story productions
+        required: false
+        type: number
+        default: 3
+      max_retries:
+        description: Maximum retries per workflow step
+        required: false
+        type: number
+        default: 3
+      model:
+        description: Optional OpenRouter model override
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dadt-orchestrated-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  orchestrated-production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run orchestrated story production
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ inputs.model || vars.OPENROUTER_MODEL }}
+          OPENROUTER_SITE_URL: ${{ vars.OPENROUTER_SITE_URL }}
+          OPENROUTER_SITE_NAME: ${{ vars.OPENROUTER_SITE_NAME }}
+          OPENROUTER_MAX_TOKENS: ${{ vars.OPENROUTER_MAX_TOKENS }}
+          OPENROUTER_DRAFT_MAX_TOKENS: ${{ vars.OPENROUTER_DRAFT_MAX_TOKENS }}
+          STORY_SLUGS: ${{ inputs.story_slugs }}
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
+          MAX_RETRIES: ${{ inputs.max_retries }}
+        run: |
+          python scripts/workflow_cli.py produce-batch "$STORY_SLUGS" \
+            --max-parallel "$MAX_PARALLEL" \
+            --max-retries "$MAX_RETRIES" \
+            --log-level INFO
+
+      - name: Generate workflow summary
+        if: always()
+        run: |
+          python scripts/workflow_cli.py status --json > /tmp/workflow-status.json
+          
+          python <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          
+          status_file = Path("/tmp/workflow-status.json")
+          if not status_file.exists():
+              print("No status file generated")
+              exit(0)
+          
+          status = json.loads(status_file.read_text())
+          
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          lines = [
+              "# Orchestrated Production Summary",
+              "",
+              f"**Total workflows:** {status['total']}",
+              "",
+              "## Status Breakdown",
+              "",
+          ]
+          
+          for status_name, count in status['by_status'].items():
+              lines.append(f"- **{status_name}:** {count}")
+          
+          if status.get('running'):
+              lines.extend([
+                  "",
+                  "## Currently Running",
+                  "",
+              ])
+              for item in status['running']:
+                  duration = item.get('duration') or 0
+                  lines.append(f"- `{item['slug']}` ({duration:.0f}s)")
+          
+          if status.get('failed'):
+              lines.extend([
+                  "",
+                  "## Failed Workflows",
+                  "",
+              ])
+              for item in status['failed']:
+                  lines.append(f"- `{item['slug']}`")
+          
+          if status.get('recent_completions'):
+              lines.extend([
+                  "",
+                  "## Recent Completions",
+                  "",
+                  "| Slug | Status | Duration | Draft | Package |",
+                  "|------|--------|----------|-------|---------|",
+              ])
+              for item in status['recent_completions']:
+                  duration = item.get('duration') or 0
+                  draft = item.get('draft_decision') or '-'
+                  package = item.get('package_decision') or '-'
+                  lines.append(
+                      f"| `{item['slug']}` | {item['status']} | {duration:.0f}s | {draft} | {package} |"
+                  )
+          
+          summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Commit generated assets
+        if: always()
+        uses: ./.github/actions/commit-and-push
+        with:
+          paths: case-files articles newsletter social video assets prompt-pads publishing
+          message: "Orchestrated production run ${{ github.run_id }}"
+
+      - name: Upload workflow state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workflow-state-${{ github.run_id }}
+          path: .workflow-state/
+          retention-days: 30
