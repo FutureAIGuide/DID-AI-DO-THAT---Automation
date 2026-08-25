@@ -373,195 +373,170 @@ class WorkflowOrchestrator:
         repo_context: dict[str, str],
     ) -> bool:
         """Execute derivative content generation (newsletter, social, etc)."""
-        logger.info(f"[{workflow.story_slug}] Generating derivative content bundle")
-        
-        workflow.metadata["derivative_paths"] = {}
-        
-        if not self._generate_newsletter(workflow, client, repo_context):
-            return False
-        if not self._generate_social_content(workflow, client, repo_context):
-            return False
-        if not self._generate_visual_briefs(workflow, client, repo_context):
-            return False
-        if not self._generate_prompt_pad(workflow, client, repo_context):
-            return False
-        
-        return True
+        def executor():
+            workflow.metadata["derivative_paths"] = {}
+            self._generate_newsletter(workflow, client, repo_context)
+            self._generate_social_content(workflow, client, repo_context)
+            self._generate_visual_briefs(workflow, client, repo_context)
+            self._generate_prompt_pad(workflow, client, repo_context)
+            return "", ""
+
+        return self.executor.execute_step(workflow, StoryStage.DERIVATIVE_CONTENT, executor)
     
     def _generate_newsletter(
         self,
         workflow: StoryWorkflow,
         client: dc.OpenRouterClient,
         repo_context: dict[str, str],
-    ) -> bool:
+    ) -> None:
         """Generate newsletter content."""
-        try:
-            prompt = textwrap.dedent(f"""
-                Today's UTC date is {workflow.run_date}.
-                Target slug: {workflow.story_slug}.
-                
-                Repository rules:
-                {repo_context.get("repo_rules", "")}
-                
-                Approved investigation:
-                {workflow.metadata.get("draft", "")}
-                
-                Draft verification report:
-                {workflow.metadata.get("draft_report", "")}
-                
-                Return markdown only for /newsletter/drafts/{workflow.story_slug}-newsletter.md.
-            """).strip()
+        prompt = textwrap.dedent(f"""
+            Today's UTC date is {workflow.run_date}.
+            Target slug: {workflow.story_slug}.
             
-            content = client.call("newsletter draft", prompt)
-            output_path = self._save_file(
-                f"newsletter/drafts/{workflow.story_slug}-newsletter.md",
-                content,
-            )
-            workflow.metadata["newsletter"] = content
-            workflow.metadata["derivative_paths"]["newsletter"] = output_path
-            return True
-        except Exception as exc:
-            logger.error(f"[{workflow.story_slug}] Newsletter generation failed: {exc}")
-            return False
+            Repository rules:
+            {repo_context.get("repo_rules", "")}
+            
+            Approved investigation:
+            {workflow.metadata.get("draft", "")}
+            
+            Draft verification report:
+            {workflow.metadata.get("draft_report", "")}
+            
+            Return markdown only for /newsletter/drafts/{workflow.story_slug}-newsletter.md.
+        """).strip()
+        
+        content = client.call("newsletter draft", prompt)
+        output_path = self._save_file(
+            f"newsletter/drafts/{workflow.story_slug}-newsletter.md",
+            content,
+        )
+        workflow.metadata["newsletter"] = content
+        workflow.metadata["derivative_paths"]["newsletter"] = output_path
     
     def _generate_social_content(
         self,
         workflow: StoryWorkflow,
         client: dc.OpenRouterClient,
         repo_context: dict[str, str],
-    ) -> bool:
+    ) -> None:
         """Generate social media content."""
-        try:
-            prompt = textwrap.dedent(f"""
-                Today's UTC date is {workflow.run_date}.
-                Target slug: {workflow.story_slug}.
-                
-                Repository rules:
-                {repo_context.get("repo_rules", "")}
-                
-                Approved investigation:
-                {workflow.metadata.get("draft", "")}
-                
-                Draft verification report:
-                {workflow.metadata.get("draft_report", "")}
-                
-                Return markdown with these exact top-level headings only:
-                # LINKEDIN
-                # X THREADS
-                # SHORTS
-                # TIKTOKS
-                # CTA BANK
-                # HOOK BANK
-            """).strip()
+        prompt = textwrap.dedent(f"""
+            Today's UTC date is {workflow.run_date}.
+            Target slug: {workflow.story_slug}.
             
-            content = client.call("social bundle", prompt)
-            sections = dc.split_sections(
-                content,
-                ["LINKEDIN", "X THREADS", "SHORTS", "TIKTOKS", "CTA BANK", "HOOK BANK"],
-            )
+            Repository rules:
+            {repo_context.get("repo_rules", "")}
             
-            paths = {}
-            paths["linkedin"] = self._save_file(
-                f"social/linkedin/{workflow.story_slug}-linkedin.md",
-                sections["LINKEDIN"],
-            )
-            paths["x_threads"] = self._save_file(
-                f"social/x-threads/{workflow.story_slug}-x-threads.md",
-                sections["X THREADS"],
-            )
-            paths["shorts"] = self._save_file(
-                f"video/shorts/{workflow.story_slug}-shorts.md",
-                sections["SHORTS"],
-            )
-            paths["tiktoks"] = self._save_file(
-                f"video/tiktoks/{workflow.story_slug}-tiktoks.md",
-                sections["TIKTOKS"],
-            )
-            paths["banks"] = self._save_file(
-                f"social/{workflow.story_slug}-cta-hook-bank.md",
-                sections["CTA BANK"] + "\n\n" + sections["HOOK BANK"],
-            )
+            Approved investigation:
+            {workflow.metadata.get("draft", "")}
             
-            workflow.metadata["social_sections"] = sections
-            workflow.metadata["derivative_paths"].update(paths)
-            return True
-        except Exception as exc:
-            logger.error(f"[{workflow.story_slug}] Social content generation failed: {exc}")
-            return False
+            Draft verification report:
+            {workflow.metadata.get("draft_report", "")}
+            
+            Return markdown with these exact top-level headings only:
+            # LINKEDIN
+            # X THREADS
+            # SHORTS
+            # TIKTOKS
+            # CTA BANK
+            # HOOK BANK
+        """).strip()
+        
+        content = client.call("social bundle", prompt)
+        sections = dc.split_sections(
+            content,
+            ["LINKEDIN", "X THREADS", "SHORTS", "TIKTOKS", "CTA BANK", "HOOK BANK"],
+        )
+        
+        paths = {}
+        paths["linkedin"] = self._save_file(
+            f"social/linkedin/{workflow.story_slug}-linkedin.md",
+            sections["LINKEDIN"],
+        )
+        paths["x_threads"] = self._save_file(
+            f"social/x-threads/{workflow.story_slug}-x-threads.md",
+            sections["X THREADS"],
+        )
+        paths["shorts"] = self._save_file(
+            f"video/shorts/{workflow.story_slug}-shorts.md",
+            sections["SHORTS"],
+        )
+        paths["tiktoks"] = self._save_file(
+            f"video/tiktoks/{workflow.story_slug}-tiktoks.md",
+            sections["TIKTOKS"],
+        )
+        paths["banks"] = self._save_file(
+            f"social/{workflow.story_slug}-cta-hook-bank.md",
+            sections["CTA BANK"] + "\n\n" + sections["HOOK BANK"],
+        )
+        
+        workflow.metadata["social_sections"] = sections
+        workflow.metadata["derivative_paths"].update(paths)
     
     def _generate_visual_briefs(
         self,
         workflow: StoryWorkflow,
         client: dc.OpenRouterClient,
         repo_context: dict[str, str],
-    ) -> bool:
+    ) -> None:
         """Generate visual content briefs."""
-        try:
-            prompt = textwrap.dedent(f"""
-                Today's UTC date is {workflow.run_date}.
-                Target slug: {workflow.story_slug}.
-                
-                Repository rules:
-                {repo_context.get("repo_rules", "")}
-                
-                Approved investigation:
-                {workflow.metadata.get("draft", "")}
-                
-                Return markdown with these exact top-level headings only:
-                # THUMBNAIL BRIEF
-                # SOCIAL IMAGE BRIEF
-            """).strip()
+        prompt = textwrap.dedent(f"""
+            Today's UTC date is {workflow.run_date}.
+            Target slug: {workflow.story_slug}.
             
-            content = client.call("visual briefs", prompt)
-            sections = dc.split_sections(content, ["THUMBNAIL BRIEF", "SOCIAL IMAGE BRIEF"])
+            Repository rules:
+            {repo_context.get("repo_rules", "")}
             
-            paths = {}
-            paths["thumbnail"] = self._save_file(
-                f"assets/thumbnails/{workflow.story_slug}-thumbnail-brief.md",
-                sections["THUMBNAIL BRIEF"],
-            )
-            paths["social_brief"] = self._save_file(
-                f"assets/social/{workflow.story_slug}-social-brief.md",
-                sections["SOCIAL IMAGE BRIEF"],
-            )
+            Approved investigation:
+            {workflow.metadata.get("draft", "")}
             
-            workflow.metadata["visual_sections"] = sections
-            workflow.metadata["derivative_paths"].update(paths)
-            return True
-        except Exception as exc:
-            logger.error(f"[{workflow.story_slug}] Visual brief generation failed: {exc}")
-            return False
+            Return markdown with these exact top-level headings only:
+            # THUMBNAIL BRIEF
+            # SOCIAL IMAGE BRIEF
+        """).strip()
+        
+        content = client.call("visual briefs", prompt)
+        sections = dc.split_sections(content, ["THUMBNAIL BRIEF", "SOCIAL IMAGE BRIEF"])
+        
+        paths = {}
+        paths["thumbnail"] = self._save_file(
+            f"assets/thumbnails/{workflow.story_slug}-thumbnail-brief.md",
+            sections["THUMBNAIL BRIEF"],
+        )
+        paths["social_brief"] = self._save_file(
+            f"assets/social/{workflow.story_slug}-social-brief.md",
+            sections["SOCIAL IMAGE BRIEF"],
+        )
+        
+        workflow.metadata["visual_sections"] = sections
+        workflow.metadata["derivative_paths"].update(paths)
     
     def _generate_prompt_pad(
         self,
         workflow: StoryWorkflow,
         client: dc.OpenRouterClient,
         repo_context: dict[str, str],
-    ) -> bool:
+    ) -> None:
         """Generate prompt pad."""
-        try:
-            prompt = textwrap.dedent(f"""
-                Today's UTC date is {workflow.run_date}.
-                Target slug: {workflow.story_slug}.
-                
-                Approved investigation:
-                {workflow.metadata.get("draft", "")}
-                
-                Create a reusable prompt pad for follow-up reporting, interviews, fact-checking, and derivative content on this story.
-                Return markdown only for /prompt-pads/{workflow.story_slug}-prompt-pad.md.
-            """).strip()
+        prompt = textwrap.dedent(f"""
+            Today's UTC date is {workflow.run_date}.
+            Target slug: {workflow.story_slug}.
             
-            content = client.call("prompt pad", prompt)
-            output_path = self._save_file(
-                f"prompt-pads/{workflow.story_slug}-prompt-pad.md",
-                content,
-            )
-            workflow.metadata["prompt_pad"] = content
-            workflow.metadata["derivative_paths"]["prompt_pad"] = output_path
-            return True
-        except Exception as exc:
-            logger.error(f"[{workflow.story_slug}] Prompt pad generation failed: {exc}")
-            return False
+            Approved investigation:
+            {workflow.metadata.get("draft", "")}
+            
+            Create a reusable prompt pad for follow-up reporting, interviews, fact-checking, and derivative content on this story.
+            Return markdown only for /prompt-pads/{workflow.story_slug}-prompt-pad.md.
+        """).strip()
+        
+        content = client.call("prompt pad", prompt)
+        output_path = self._save_file(
+            f"prompt-pads/{workflow.story_slug}-prompt-pad.md",
+            content,
+        )
+        workflow.metadata["prompt_pad"] = content
+        workflow.metadata["derivative_paths"]["prompt_pad"] = output_path
     
     def _execute_package_verification(
         self,
