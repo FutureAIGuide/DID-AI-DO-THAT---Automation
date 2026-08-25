@@ -373,8 +373,9 @@ class WorkflowOrchestrator:
         repo_context: dict[str, str],
     ) -> bool:
         """Execute derivative content generation (newsletter, social, etc)."""
+        workflow.metadata["derivative_paths"] = {}
+
         def executor():
-            workflow.metadata["derivative_paths"] = {}
             self._generate_newsletter(workflow, client, repo_context)
             self._generate_social_content(workflow, client, repo_context)
             self._generate_visual_briefs(workflow, client, repo_context)
