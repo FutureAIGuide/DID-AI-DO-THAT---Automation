@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   monitor:
@@ -16,6 +17,28 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Download latest workflow state artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .workflow-state
+          # Find the most recent successful run of orchestrated-production.yml that uploaded a workflow-state artifact
+          RUN_ID=$(gh api "repos/${{ github.repository }}/actions/workflows/orchestrated-production.yml/runs?status=completed&per_page=10" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | first | .id // empty')
+          if [ -n "$RUN_ID" ]; then
+            ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}/artifacts" \
+              --jq '.artifacts[] | select(.name | startswith("workflow-state-")) | .id' | head -1)
+            if [ -n "$ARTIFACT_ID" ]; then
+              gh api "repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip" > /tmp/workflow-state.zip
+              unzip -o /tmp/workflow-state.zip -d .workflow-state/ || true
+              echo "Downloaded workflow state from run ${RUN_ID}, artifact ${ARTIFACT_ID}"
+            else
+              echo "No workflow-state artifact found for run ${RUN_ID}"
+            fi
+          else
+            echo "No completed orchestrated-production run found"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5

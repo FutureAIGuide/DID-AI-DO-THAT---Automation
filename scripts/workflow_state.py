@@ -55,6 +55,9 @@ class StepState:
         """Mark step as started."""
         self.status = WorkflowStatus.RUNNING
         self.started_at = time.time()
+        self.completed_at = None
+        self.output_path = None
+        self.error = None
         self.attempt += 1
     
     def succeed(self, output_path: str | None = None) -> None:
@@ -158,16 +161,18 @@ class StoryWorkflow:
     @classmethod
     def from_dict(cls, data: dict) -> StoryWorkflow:
         """Create from dictionary."""
+        data = data.copy()
         steps_data = data.pop("steps", {})
         workflow = cls(**{k: v for k, v in data.items() if k != "status"})
         workflow.status = WorkflowStatus(data["status"])
-        
+
         for step_name, step_data in steps_data.items():
+            step_data = step_data.copy()
             step_status = WorkflowStatus(step_data.pop("status"))
             step = StepState(**step_data)
             step.status = step_status
             workflow.steps[step_name] = step
-        
+
         return workflow
 
 
@@ -195,10 +200,11 @@ class WorkflowRegistry:
     def save_workflow(self, workflow: StoryWorkflow) -> Path:
         """Save workflow state to disk."""
         file_path = self.state_dir / f"{workflow.story_slug}.json"
-        file_path.write_text(
-            json.dumps(workflow.to_dict(), indent=2) + "\n",
-            encoding="utf-8",
-        )
+        temp_path = file_path.with_suffix(".tmp")
+        with temp_path.open("w", encoding="utf-8") as temp_file:
+            temp_file.write(json.dumps(workflow.to_dict(), indent=2) + "\n")
+            temp_file.flush()
+        temp_path.replace(file_path)
         return file_path
     
     def load_workflow(self, story_slug: str) -> StoryWorkflow | None:
@@ -231,7 +237,7 @@ class WorkflowRegistry:
             if status is None or workflow.status == status:
                 all_workflows.append(workflow)
         
-        if limit:
+        if limit is not None:
             return all_workflows[:limit]
         return all_workflows
     
