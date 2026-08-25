@@ -12,6 +12,7 @@ import os
 import sys
 import textwrap
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -110,12 +111,12 @@ class StepExecutor:
                 )
                 
                 if step.can_retry():
-                    step.retry()
-                    self.registry.save_workflow(workflow)
                     delay = min(
                         self.config.retry_delay_seconds * 2 ** (step.attempt - 1),
                         self.config.retry_delay_seconds * 16,
                     )
+                    step.retry()
+                    self.registry.save_workflow(workflow)
                     logger.warning(
                         f"[{workflow.story_slug}] Retrying {stage_name} "
                         f"in {delay}s..."
@@ -234,7 +235,6 @@ class WorkflowOrchestrator:
             
         except Exception as exc:
             logger.exception(f"[{story_slug}] Workflow failed with exception")
-            import traceback
             workflow.metadata["error"] = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             workflow.fail()
             self.registry.save_workflow(workflow)

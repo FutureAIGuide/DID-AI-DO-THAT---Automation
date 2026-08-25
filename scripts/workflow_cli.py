@@ -360,6 +360,14 @@ def _load_repo_context(root_dir: Path, story_slug: str | None) -> dict[str, str]
     }
 
 
+def _positive_int(value: str) -> int:
+    """Argument type that requires a positive integer (>= 1)."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
 def main() -> int:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -406,13 +414,7 @@ def main() -> int:
     # Produce batch command
     batch_parser = subparsers.add_parser("produce-batch", help="Produce multiple stories in parallel")
     batch_parser.add_argument("slugs", help="Comma-separated story slugs")
-    def positive_int(value: str) -> int:
-        parsed = int(value)
-        if parsed < 1:
-            raise argparse.ArgumentTypeError("must be at least 1")
-        return parsed
-
-    batch_parser.add_argument("--max-parallel", type=positive_int, default=3, help="Max parallel stories")
+    batch_parser.add_argument("--max-parallel", type=_positive_int, default=3, help="Max parallel stories")
     batch_parser.add_argument("--model", help="OpenRouter model override")
     batch_parser.add_argument("--run-date", help="Run date (ISO format)")
     batch_parser.add_argument("--run-id", help="Run ID")
