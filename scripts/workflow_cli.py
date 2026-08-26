@@ -191,6 +191,10 @@ def cmd_produce(args: argparse.Namespace) -> int:
         max_tokens=int(os.environ.get("OPENROUTER_MAX_TOKENS", dc.DEFAULT_MAX_TOKENS)),
     )
     
+    if not dc.is_valid_slug(args.slug):
+        print("Error: Invalid slug format", file=sys.stderr)
+        return 1
+
     repo_context = _load_repo_context(config.root_dir, args.slug)
     
     print(f"Producing story: {args.slug}")
@@ -254,7 +258,7 @@ def cmd_produce_batch(args: argparse.Namespace) -> int:
         max_tokens=int(os.environ.get("OPENROUTER_MAX_TOKENS", dc.DEFAULT_MAX_TOKENS)),
     )
     
-    repo_context = _load_repo_context(config.root_dir, None)
+    per_slug_context = {slug: _load_repo_context(config.root_dir, slug) for slug in slugs}
     
     print(f"Producing {len(slugs)} stories in parallel (max {config.max_parallel_stories} concurrent)")
     print(f"Model: {model}")
@@ -266,10 +270,9 @@ def cmd_produce_batch(args: argparse.Namespace) -> int:
         run_date=run_date,
         run_id=run_id,
         client=client,
-        repo_context=repo_context,
+        repo_context=None,
+        per_slug_context=per_slug_context,
     )
-    
-    print()
     print("=" * 60)
     print("BATCH PRODUCTION COMPLETE")
     print("=" * 60)
@@ -357,6 +360,14 @@ def _load_repo_context(root_dir: Path, story_slug: str | None) -> dict[str, str]
     }
 
 
+def _positive_int(value: str) -> int:
+    """Argument type that requires a positive integer (>= 1)."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
 def main() -> int:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -403,7 +414,7 @@ def main() -> int:
     # Produce batch command
     batch_parser = subparsers.add_parser("produce-batch", help="Produce multiple stories in parallel")
     batch_parser.add_argument("slugs", help="Comma-separated story slugs")
-    batch_parser.add_argument("--max-parallel", type=int, default=3, help="Max parallel stories")
+    batch_parser.add_argument("--max-parallel", type=_positive_int, default=3, help="Max parallel stories")
     batch_parser.add_argument("--model", help="OpenRouter model override")
     batch_parser.add_argument("--run-date", help="Run date (ISO format)")
     batch_parser.add_argument("--run-id", help="Run ID")

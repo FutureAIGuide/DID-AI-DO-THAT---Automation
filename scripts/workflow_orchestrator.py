@@ -12,6 +12,7 @@ import os
 import sys
 import textwrap
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 class OrchestratorConfig:
     """Configuration for workflow orchestrator."""
     root_dir: Path = field(default_factory=lambda: Path.cwd())
-    state_dir: Path = field(default_factory=lambda: Path(".workflow-state"))
+    state_dir: Path | None = None
     max_parallel_stories: int = 3
     max_retries_per_step: int = 3
     retry_delay_seconds: int = 60
@@ -46,7 +47,9 @@ class OrchestratorConfig:
     log_level: str = "INFO"
     
     def __post_init__(self):
-        """Configure logging."""
+        """Configure logging and resolve state_dir relative to root_dir."""
+        if self.state_dir is None:
+            self.state_dir = self.root_dir / ".workflow-state"
         logging.basicConfig(
             level=getattr(logging, self.log_level.upper()),
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -62,27 +65,29 @@ class StepExecutor:
     def execute_step(
         self,
         workflow: StoryWorkflow,
-        stage: StoryStage,
+        stage: StoryStage | str,
         executor_fn: Callable[[], tuple[str, str]],
     ) -> bool:
         """Execute a workflow step with retry logic.
         
         Args:
             workflow: The story workflow
-            stage: The pipeline stage
+            stage: The pipeline stage (StoryStage or string name)
             executor_fn: Function that returns (content, output_path)
             
         Returns:
             True if step succeeded, False otherwise
         """
-        step = workflow.get_step(stage)
+        stage_name = stage.value if isinstance(stage, StoryStage) else stage
+        step = workflow.get_step(stage_name)
+        step.max_attempts = self.config.max_retries_per_step
         
         while True:
             step.start()
             self.registry.save_workflow(workflow)
             
             logger.info(
-                f"[{workflow.story_slug}] Starting {stage.value} "
+                f"[{workflow.story_slug}] Starting {stage_name} "
                 f"(attempt {step.attempt}/{step.max_attempts})"
             )
             
@@ -91,7 +96,7 @@ class StepExecutor:
                 step.succeed(output_path=output_path)
                 self.registry.save_workflow(workflow)
                 logger.info(
-                    f"[{workflow.story_slug}] Completed {stage.value} "
+                    f"[{workflow.story_slug}] Completed {stage_name} "
                     f"in {step.duration:.1f}s -> {output_path}"
                 )
                 return True
@@ -102,20 +107,24 @@ class StepExecutor:
                 self.registry.save_workflow(workflow)
                 
                 logger.error(
-                    f"[{workflow.story_slug}] Failed {stage.value}: {error_msg}"
+                    f"[{workflow.story_slug}] Failed {stage_name}: {error_msg}"
                 )
                 
                 if step.can_retry():
+                    delay = min(
+                        self.config.retry_delay_seconds * 2 ** (step.attempt - 1),
+                        self.config.retry_delay_seconds * 16,
+                    )
                     step.retry()
                     self.registry.save_workflow(workflow)
                     logger.warning(
-                        f"[{workflow.story_slug}] Retrying {stage.value} "
-                        f"in {self.config.retry_delay_seconds}s..."
+                        f"[{workflow.story_slug}] Retrying {stage_name} "
+                        f"in {delay}s..."
                     )
-                    time.sleep(self.config.retry_delay_seconds)
+                    time.sleep(delay)
                 else:
                     logger.error(
-                        f"[{workflow.story_slug}] Max retries exceeded for {stage.value}"
+                        f"[{workflow.story_slug}] Max retries exceeded for {stage_name}"
                     )
                     return False
 
@@ -163,6 +172,9 @@ class WorkflowOrchestrator:
         workflow = self.registry.get_workflow(story_slug)
         if workflow is None:
             workflow = self.create_workflow(story_slug, run_date, run_id)
+        elif workflow.is_complete:
+            logger.info(f"Workflow already complete for story: {story_slug}, returning existing")
+            return workflow
         
         workflow.start()
         self.registry.save_workflow(workflow)
@@ -223,6 +235,7 @@ class WorkflowOrchestrator:
             
         except Exception as exc:
             logger.exception(f"[{story_slug}] Workflow failed with exception")
+            workflow.metadata["error"] = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             workflow.fail()
             self.registry.save_workflow(workflow)
         
@@ -373,171 +386,191 @@ class WorkflowOrchestrator:
         repo_context: dict[str, str],
     ) -> bool:
         """Execute derivative content generation (newsletter, social, etc)."""
-        workflow.metadata["derivative_paths"] = {}
-
-        def executor():
-            self._generate_newsletter(workflow, client, repo_context)
-            self._generate_social_content(workflow, client, repo_context)
-            self._generate_visual_briefs(workflow, client, repo_context)
-            self._generate_prompt_pad(workflow, client, repo_context)
-            return "", ""
-
-        return self.executor.execute_step(workflow, StoryStage.DERIVATIVE_CONTENT, executor)
+        logger.info(f"[{workflow.story_slug}] Generating derivative content bundle")
+        
+        workflow.metadata.setdefault("derivative_paths", {})
+        
+        if not self._generate_newsletter(workflow, client, repo_context):
+            return False
+        if not self._generate_social_content(workflow, client, repo_context):
+            return False
+        if not self._generate_visual_briefs(workflow, client, repo_context):
+            return False
+        if not self._generate_prompt_pad(workflow, client, repo_context):
+            return False
+        
+        return True
     
     def _generate_newsletter(
         self,
         workflow: StoryWorkflow,
         client: dc.OpenRouterClient,
         repo_context: dict[str, str],
-    ) -> None:
+    ) -> bool:
         """Generate newsletter content."""
-        prompt = textwrap.dedent(f"""
-            Today's UTC date is {workflow.run_date}.
-            Target slug: {workflow.story_slug}.
+        def executor():
+            prompt = textwrap.dedent(f"""
+                Today's UTC date is {workflow.run_date}.
+                Target slug: {workflow.story_slug}.
+                
+                Repository rules:
+                {repo_context.get("repo_rules", "")}
+                
+                Approved investigation:
+                {workflow.metadata.get("draft", "")}
+                
+                Draft verification report:
+                {workflow.metadata.get("draft_report", "")}
+                
+                Return markdown only for /newsletter/drafts/{workflow.story_slug}-newsletter.md.
+            """).strip()
             
-            Repository rules:
-            {repo_context.get("repo_rules", "")}
-            
-            Approved investigation:
-            {workflow.metadata.get("draft", "")}
-            
-            Draft verification report:
-            {workflow.metadata.get("draft_report", "")}
-            
-            Return markdown only for /newsletter/drafts/{workflow.story_slug}-newsletter.md.
-        """).strip()
+            content = client.call("newsletter draft", prompt)
+            output_path = self._save_file(
+                f"newsletter/drafts/{workflow.story_slug}-newsletter.md",
+                content,
+            )
+            workflow.metadata["newsletter"] = content
+            workflow.metadata["derivative_paths"]["newsletter"] = output_path
+            return content, output_path
         
-        content = client.call("newsletter draft", prompt)
-        output_path = self._save_file(
-            f"newsletter/drafts/{workflow.story_slug}-newsletter.md",
-            content,
-        )
-        workflow.metadata["newsletter"] = content
-        workflow.metadata["derivative_paths"]["newsletter"] = output_path
+        return self.executor.execute_step(workflow, "newsletter", executor)
     
     def _generate_social_content(
         self,
         workflow: StoryWorkflow,
         client: dc.OpenRouterClient,
         repo_context: dict[str, str],
-    ) -> None:
+    ) -> bool:
         """Generate social media content."""
-        prompt = textwrap.dedent(f"""
-            Today's UTC date is {workflow.run_date}.
-            Target slug: {workflow.story_slug}.
+        def executor():
+            prompt = textwrap.dedent(f"""
+                Today's UTC date is {workflow.run_date}.
+                Target slug: {workflow.story_slug}.
+                
+                Repository rules:
+                {repo_context.get("repo_rules", "")}
+                
+                Approved investigation:
+                {workflow.metadata.get("draft", "")}
+                
+                Draft verification report:
+                {workflow.metadata.get("draft_report", "")}
+                
+                Return markdown with these exact top-level headings only:
+                # LINKEDIN
+                # X THREADS
+                # SHORTS
+                # TIKTOKS
+                # CTA BANK
+                # HOOK BANK
+            """).strip()
             
-            Repository rules:
-            {repo_context.get("repo_rules", "")}
+            content = client.call("social bundle", prompt)
+            sections = dc.split_sections(
+                content,
+                ["LINKEDIN", "X THREADS", "SHORTS", "TIKTOKS", "CTA BANK", "HOOK BANK"],
+            )
             
-            Approved investigation:
-            {workflow.metadata.get("draft", "")}
+            paths = {}
+            paths["linkedin"] = self._save_file(
+                f"social/linkedin/{workflow.story_slug}-linkedin.md",
+                sections["LINKEDIN"],
+            )
+            paths["x_threads"] = self._save_file(
+                f"social/x-threads/{workflow.story_slug}-x-threads.md",
+                sections["X THREADS"],
+            )
+            paths["shorts"] = self._save_file(
+                f"video/shorts/{workflow.story_slug}-shorts.md",
+                sections["SHORTS"],
+            )
+            paths["tiktoks"] = self._save_file(
+                f"video/tiktoks/{workflow.story_slug}-tiktoks.md",
+                sections["TIKTOKS"],
+            )
+            paths["banks"] = self._save_file(
+                f"social/{workflow.story_slug}-cta-hook-bank.md",
+                sections["CTA BANK"] + "\n\n" + sections["HOOK BANK"],
+            )
             
-            Draft verification report:
-            {workflow.metadata.get("draft_report", "")}
-            
-            Return markdown with these exact top-level headings only:
-            # LINKEDIN
-            # X THREADS
-            # SHORTS
-            # TIKTOKS
-            # CTA BANK
-            # HOOK BANK
-        """).strip()
+            workflow.metadata["social_sections"] = sections
+            workflow.metadata["derivative_paths"].update(paths)
+            return content, paths.get("linkedin", "")
         
-        content = client.call("social bundle", prompt)
-        sections = dc.split_sections(
-            content,
-            ["LINKEDIN", "X THREADS", "SHORTS", "TIKTOKS", "CTA BANK", "HOOK BANK"],
-        )
-        
-        paths = {}
-        paths["linkedin"] = self._save_file(
-            f"social/linkedin/{workflow.story_slug}-linkedin.md",
-            sections["LINKEDIN"],
-        )
-        paths["x_threads"] = self._save_file(
-            f"social/x-threads/{workflow.story_slug}-x-threads.md",
-            sections["X THREADS"],
-        )
-        paths["shorts"] = self._save_file(
-            f"video/shorts/{workflow.story_slug}-shorts.md",
-            sections["SHORTS"],
-        )
-        paths["tiktoks"] = self._save_file(
-            f"video/tiktoks/{workflow.story_slug}-tiktoks.md",
-            sections["TIKTOKS"],
-        )
-        paths["banks"] = self._save_file(
-            f"social/{workflow.story_slug}-cta-hook-bank.md",
-            sections["CTA BANK"] + "\n\n" + sections["HOOK BANK"],
-        )
-        
-        workflow.metadata["social_sections"] = sections
-        workflow.metadata["derivative_paths"].update(paths)
+        return self.executor.execute_step(workflow, "social_content", executor)
     
     def _generate_visual_briefs(
         self,
         workflow: StoryWorkflow,
         client: dc.OpenRouterClient,
         repo_context: dict[str, str],
-    ) -> None:
+    ) -> bool:
         """Generate visual content briefs."""
-        prompt = textwrap.dedent(f"""
-            Today's UTC date is {workflow.run_date}.
-            Target slug: {workflow.story_slug}.
+        def executor():
+            prompt = textwrap.dedent(f"""
+                Today's UTC date is {workflow.run_date}.
+                Target slug: {workflow.story_slug}.
+                
+                Repository rules:
+                {repo_context.get("repo_rules", "")}
+                
+                Approved investigation:
+                {workflow.metadata.get("draft", "")}
+                
+                Return markdown with these exact top-level headings only:
+                # THUMBNAIL BRIEF
+                # SOCIAL IMAGE BRIEF
+            """).strip()
             
-            Repository rules:
-            {repo_context.get("repo_rules", "")}
+            content = client.call("visual briefs", prompt)
+            sections = dc.split_sections(content, ["THUMBNAIL BRIEF", "SOCIAL IMAGE BRIEF"])
             
-            Approved investigation:
-            {workflow.metadata.get("draft", "")}
+            paths = {}
+            paths["thumbnail"] = self._save_file(
+                f"assets/thumbnails/{workflow.story_slug}-thumbnail-brief.md",
+                sections["THUMBNAIL BRIEF"],
+            )
+            paths["social_brief"] = self._save_file(
+                f"assets/social/{workflow.story_slug}-social-brief.md",
+                sections["SOCIAL IMAGE BRIEF"],
+            )
             
-            Return markdown with these exact top-level headings only:
-            # THUMBNAIL BRIEF
-            # SOCIAL IMAGE BRIEF
-        """).strip()
+            workflow.metadata["visual_sections"] = sections
+            workflow.metadata["derivative_paths"].update(paths)
+            return content, paths.get("thumbnail", "")
         
-        content = client.call("visual briefs", prompt)
-        sections = dc.split_sections(content, ["THUMBNAIL BRIEF", "SOCIAL IMAGE BRIEF"])
-        
-        paths = {}
-        paths["thumbnail"] = self._save_file(
-            f"assets/thumbnails/{workflow.story_slug}-thumbnail-brief.md",
-            sections["THUMBNAIL BRIEF"],
-        )
-        paths["social_brief"] = self._save_file(
-            f"assets/social/{workflow.story_slug}-social-brief.md",
-            sections["SOCIAL IMAGE BRIEF"],
-        )
-        
-        workflow.metadata["visual_sections"] = sections
-        workflow.metadata["derivative_paths"].update(paths)
+        return self.executor.execute_step(workflow, "visual_briefs", executor)
     
     def _generate_prompt_pad(
         self,
         workflow: StoryWorkflow,
         client: dc.OpenRouterClient,
         repo_context: dict[str, str],
-    ) -> None:
+    ) -> bool:
         """Generate prompt pad."""
-        prompt = textwrap.dedent(f"""
-            Today's UTC date is {workflow.run_date}.
-            Target slug: {workflow.story_slug}.
+        def executor():
+            prompt = textwrap.dedent(f"""
+                Today's UTC date is {workflow.run_date}.
+                Target slug: {workflow.story_slug}.
+                
+                Approved investigation:
+                {workflow.metadata.get("draft", "")}
+                
+                Create a reusable prompt pad for follow-up reporting, interviews, fact-checking, and derivative content on this story.
+                Return markdown only for /prompt-pads/{workflow.story_slug}-prompt-pad.md.
+            """).strip()
             
-            Approved investigation:
-            {workflow.metadata.get("draft", "")}
-            
-            Create a reusable prompt pad for follow-up reporting, interviews, fact-checking, and derivative content on this story.
-            Return markdown only for /prompt-pads/{workflow.story_slug}-prompt-pad.md.
-        """).strip()
+            content = client.call("prompt pad", prompt)
+            output_path = self._save_file(
+                f"prompt-pads/{workflow.story_slug}-prompt-pad.md",
+                content,
+            )
+            workflow.metadata["prompt_pad"] = content
+            workflow.metadata["derivative_paths"]["prompt_pad"] = output_path
+            return content, output_path
         
-        content = client.call("prompt pad", prompt)
-        output_path = self._save_file(
-            f"prompt-pads/{workflow.story_slug}-prompt-pad.md",
-            content,
-        )
-        workflow.metadata["prompt_pad"] = content
-        workflow.metadata["derivative_paths"]["prompt_pad"] = output_path
+        return self.executor.execute_step(workflow, "prompt_pad", executor)
     
     def _execute_package_verification(
         self,
@@ -610,17 +643,17 @@ class WorkflowOrchestrator:
         """Execute publishing package generation."""
         logger.info(f"[{workflow.story_slug}] Generating publishing package")
         
-        try:
+        def executor():
             self._generate_metadata(workflow, client)
             self._generate_seo_package(workflow, client)
             self._generate_youtube_package(workflow, client)
             self._generate_distribution_plan(workflow, client)
             self._generate_executive_summary(workflow, client)
             self._create_publishing_package(workflow)
-            return True
-        except Exception as exc:
-            logger.error(f"[{workflow.story_slug}] Publishing phase failed: {exc}")
-            return False
+            package_dir = workflow.metadata.get("package_dir", "")
+            return package_dir, package_dir
+        
+        return self.executor.execute_step(workflow, StoryStage.PUBLISHING, executor)
     
     def _generate_metadata(self, workflow: StoryWorkflow, client: dc.OpenRouterClient) -> None:
         """Generate publication metadata."""
@@ -774,7 +807,8 @@ class WorkflowOrchestrator:
         run_date: str,
         run_id: str,
         client: dc.OpenRouterClient,
-        repo_context: dict[str, str],
+        repo_context: dict[str, str] | None = None,
+        per_slug_context: dict[str, dict[str, str]] | None = None,
     ) -> list[StoryWorkflow]:
         """Produce multiple stories in parallel.
         
@@ -783,14 +817,20 @@ class WorkflowOrchestrator:
             run_date: ISO date of production run
             run_id: Unique run identifier
             client: OpenRouter API client
-            repo_context: Dictionary of repository context files
+            repo_context: Shared repository context (used when per_slug_context is absent)
+            per_slug_context: Per-slug repository context overriding repo_context
             
         Returns:
             List of completed workflows
         """
+        def _ctx(slug: str) -> dict[str, str]:
+            if per_slug_context and slug in per_slug_context:
+                return per_slug_context[slug]
+            return repo_context or {}
+
         if not self.config.enable_parallel_execution or len(story_slugs) == 1:
             return [
-                self.produce_story(slug, run_date, run_id, client, repo_context)
+                self.produce_story(slug, run_date, run_id, client, _ctx(slug))
                 for slug in story_slugs
             ]
         
@@ -810,7 +850,7 @@ class WorkflowOrchestrator:
                     run_date,
                     run_id,
                     client,
-                    repo_context,
+                    _ctx(slug),
                 ): slug
                 for slug in story_slugs
             }
@@ -826,7 +866,13 @@ class WorkflowOrchestrator:
         
         return workflows
     
-    def retry_failed_workflows(self) -> list[StoryWorkflow]:
+    def retry_failed_workflows(
+        self,
+        run_date: str | None = None,
+        run_id: str | None = None,
+        client: dc.OpenRouterClient | None = None,
+        repo_context: dict[str, str] | None = None,
+    ) -> list[StoryWorkflow]:
         """Retry all failed workflows."""
         failed = self.registry.get_failed_workflows()
         logger.info(f"Retrying {len(failed)} failed workflows")
@@ -836,7 +882,21 @@ class WorkflowOrchestrator:
             logger.info(f"Retrying workflow: {workflow.story_slug}")
             workflow.status = WorkflowStatus.RETRYING
             self.registry.save_workflow(workflow)
-            results.append(workflow)
+            
+            if client is not None:
+                _run_date = run_date or workflow.run_date
+                _run_id = run_id or f"retry-{int(time.time())}"
+                _repo_context = repo_context or {}
+                retried = self.produce_story(
+                    story_slug=workflow.story_slug,
+                    run_date=_run_date,
+                    run_id=_run_id,
+                    client=client,
+                    repo_context=_repo_context,
+                )
+                results.append(retried)
+            else:
+                results.append(workflow)
         
         return results
     
@@ -863,7 +923,13 @@ class WorkflowOrchestrator:
         ]
         
         summary["failed"] = [
-            {"slug": w.story_slug, "error": w.metadata.get("error")}
+            {
+                "slug": w.story_slug,
+                "error": w.metadata.get("error") or next(
+                    (s.error for s in reversed(list(w.steps.values())) if s.error),
+                    None,
+                ),
+            }
             for w in all_workflows
             if w.status == WorkflowStatus.FAILED
         ]
