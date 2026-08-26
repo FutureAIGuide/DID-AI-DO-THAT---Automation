@@ -388,7 +388,7 @@ class WorkflowOrchestrator:
         """Execute derivative content generation (newsletter, social, etc)."""
         logger.info(f"[{workflow.story_slug}] Generating derivative content bundle")
         
-        workflow.metadata["derivative_paths"] = {}
+        workflow.metadata.setdefault("derivative_paths", {})
         
         if not self._generate_newsletter(workflow, client, repo_context):
             return False
